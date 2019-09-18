@@ -258,10 +258,6 @@ public class Server implements Closeable {
         .orElse(null);
   }
 
-  private static JsonObject toJson(final Document document) {
-    return fromBson(toBsonDocument(document));
-  }
-
   public void close() {
     producer.close();
 
@@ -336,7 +332,8 @@ public class Server implements Closeable {
   }
 
   private MongoCollection<Document> getCollection(final Path path) {
-    return mongoDatabase.getCollection(path.fullType());
+    return mongoDatabase.getCollection(
+        path.fullType() + (environment != null ? ("-" + environment) : ""));
   }
 
   private Optional<JsonObject> getJwt(final Request request) {
@@ -351,8 +348,9 @@ public class Server implements Closeable {
         .thenApply(
             r ->
                 ok().withBody(
-                        with(getCollection(path).find(completeQuery((Bson) null, jwt)))
-                            .map(Server::toJson)
+                        with(getCollection(path)
+                                .find(completeQuery((Bson) null, jwt), BsonDocument.class))
+                            .map(BsonUtil::fromBson)
                             .filter(json -> responseFilter.test(json, jwt))
                             .get()));
   }
@@ -361,13 +359,13 @@ public class Server implements Closeable {
     final Function<JsonObject, Response> filter =
         json -> responseFilter.test(json, jwt) ? ok().withBody(of(list(json))) : forbidden();
 
-    return find(getCollection(path), completeQuery(eq(ID, path.id), jwt), null)
+    return find(getCollection(path), completeQuery(eq(ID, path.id), jwt), BsonDocument.class, null)
         .thenComposeAsync(
             result ->
                 result.isEmpty()
                     ? completedFuture(notFound())
                     : sendAudit(jwt, path, "get")
-                        .thenApply(r -> filter.apply(toJson(result.get(0)))));
+                        .thenApply(r -> filter.apply(fromBson(result.get(0)))));
   }
 
   private Optional<Path> getPath(final Request request) {
@@ -388,7 +386,7 @@ public class Server implements Closeable {
     return Optional.ofNullable(request.queryString)
         .map(q -> q.get("u"))
         .filter(u -> u.length == 1)
-        .map(u -> decodeUsername(u[0]))
+        .map(u -> decodeUsername(u[0].replace(' ', '+')))
         .map(username -> completedFuture(ok().withHeaders(fanoutHeaders(username))))
         .orElseGet(() -> completedFuture(forbidden()));
   }
@@ -508,8 +506,9 @@ public class Server implements Closeable {
                     .thenApply(
                         r ->
                             ok().withBody(
-                                    with(getCollection(path).aggregate(pair.first))
-                                        .map(Server::toJson)
+                                    with(getCollection(path)
+                                            .aggregate(pair.first, BsonDocument.class))
+                                        .map(BsonUtil::fromBson)
                                         .filter(json -> responseFilter.test(json, jwt))
                                         .get())))
         .orElseGet(() -> completedFuture(badRequest()));

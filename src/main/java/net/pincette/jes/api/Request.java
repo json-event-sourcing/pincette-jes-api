@@ -114,8 +114,8 @@ public class Request {
         .map(
             values ->
                 stream(values)
-                    .flatMap(value -> stream(value.split(" ;")))
-                    .map(cookie -> cookie.split("="))
+                    .flatMap(value -> stream(value.split(";")))
+                    .map(cookie -> cookie.trim().split("="))
                     .filter(split -> split.length == 2)
                     .collect(toMap(s -> s[0], s -> s[1])))
         .orElseGet(HashMap::new);
