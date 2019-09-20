@@ -214,6 +214,10 @@ public class Server implements Closeable {
         .collect(toSet());
   }
 
+  private static boolean hasMatch(final List<BsonDocument> stages) {
+    return stages.stream().anyMatch(stage -> stage.containsKey(MATCH));
+  }
+
   private static boolean isCorrectObject(final Request request, final String id) {
     return Optional.ofNullable(request.body)
         .filter(Json::isObject)
@@ -270,6 +274,10 @@ public class Server implements Closeable {
     return command.getString(TYPE) + "-command" + (environment != null ? ("-" + environment) : "");
   }
 
+  private BsonDocument completeMatch(final Bson original, final JsonObject jwt) {
+    return new BsonDocument(MATCH, toBsonDocument(completeQuery(original, jwt)));
+  }
+
   private Bson completeQuery(final Bson original, final JsonObject jwt) {
     return and(
         create(() -> list(NOT_DELETED))
@@ -283,14 +291,16 @@ public class Server implements Closeable {
   }
 
   private List<BsonDocument> completeQuery(final List<BsonDocument> stages, final JsonObject jwt) {
-    return stages.stream()
-        .map(
-            stage ->
-                stage.containsKey(MATCH)
-                    ? new BsonDocument(
-                        MATCH, toBsonDocument(completeQuery(stage.getDocument(MATCH), jwt)))
-                    : stage)
-        .collect(toList());
+    final List<BsonDocument> result =
+        stages.stream()
+            .map(
+                stage ->
+                    stage.containsKey(MATCH) ? completeMatch(stage.getDocument(MATCH), jwt) : stage)
+            .collect(toList());
+
+    return hasMatch(result)
+        ? result
+        : concat(Stream.of(completeMatch(null, jwt)), result.stream()).collect(toList());
   }
 
   private String decodeUsername(final String username) {
