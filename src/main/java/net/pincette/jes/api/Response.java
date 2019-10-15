@@ -1,5 +1,6 @@
 package net.pincette.jes.api;
 
+import static net.pincette.jes.api.Util.headersToString;
 import static net.pincette.util.Collections.map;
 import static net.pincette.util.Pair.pair;
 
@@ -65,6 +66,10 @@ public class Response {
     return new Response(403);
   }
 
+  public static Response internalServerError() {
+    return new Response(500);
+  }
+
   public static Response notAuthorized() {
     return new Response(401);
   }
@@ -83,6 +88,10 @@ public class Response {
 
   public static Response redirect(final String location) {
     return new Response(303, map(pair("Location", new String[] {location})), null);
+  }
+
+  public String toString() {
+    return "Status code: " + statusCode + "\n" + headersToString(headers);
   }
 
   public Response withBody(final Publisher<JsonObject> body) {

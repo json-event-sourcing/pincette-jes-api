@@ -1,9 +1,13 @@
 package net.pincette.jes.api;
 
+import static java.lang.String.join;
 import static java.net.URLDecoder.decode;
 import static java.util.Arrays.stream;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
+import static net.pincette.jes.api.Util.headersToString;
+import static net.pincette.util.Json.string;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.isFloat;
 import static net.pincette.util.Util.tryToGetSilent;
@@ -162,6 +166,23 @@ public class Request {
   private static <V> Map<String, V> toLowerCase(final Map<String, V> map) {
     return map.entrySet().stream()
         .collect(toMap(e -> e.getKey().toLowerCase(), Map.Entry::getValue));
+  }
+
+  private String queryStringToString() {
+    return queryString.entrySet().stream()
+        .flatMap(entry -> stream(entry.getValue()).map(v -> entry.getKey() + "=" + v))
+        .collect(joining("&"));
+  }
+
+  public String toString() {
+    return method
+        + " "
+        + path
+        + (queryString != null ? ("?" + queryStringToString()) : "")
+        + "\n"
+        + headersToString(headers)
+        + "\n"
+        + (body != null ? string(body) : "");
   }
 
   public Request withBody(final JsonStructure body) {

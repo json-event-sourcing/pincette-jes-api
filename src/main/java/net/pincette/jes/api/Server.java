@@ -17,6 +17,10 @@ import static java.util.Base64.getDecoder;
 import static java.util.Base64.getEncoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.logging.Level.FINEST;
+import static java.util.logging.Level.INFO;
+import static java.util.logging.Level.SEVERE;
+import static java.util.logging.Logger.getGlobal;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
 import static java.util.stream.Stream.concat;
@@ -83,12 +87,15 @@ import java.util.Set;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 import javax.json.JsonArray;
 import javax.json.JsonObject;
 import javax.json.JsonObjectBuilder;
 import javax.json.JsonString;
 import javax.json.JsonValue;
+import net.pincette.function.SideEffect;
+import net.pincette.function.SupplierWithException;
 import net.pincette.jes.util.AuditFields;
 import net.pincette.jes.util.JsonSerializer;
 import net.pincette.mongo.BsonUtil;
@@ -120,9 +127,11 @@ import org.bson.conversions.Bson;
  */
 public class Server implements Closeable {
   private static final String ACCESS_TOKEN = "access_token";
+  private static final String ERROR = "ERROR";
   private static final String MATCH = "$match";
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
+
   private final char[] salt = randomUUID().toString().toCharArray();
   private String auditTopic;
   private boolean breakingTheGlass;
@@ -132,6 +141,7 @@ public class Server implements Closeable {
   private int fanoutTimeout = 20;
   private String fanoutUri;
   private JwtParser jwtParser;
+  private Logger logger = getGlobal();
   private MongoClient mongoClient;
   private MongoDatabase mongoDatabase;
   private String mongoDatabaseName;
@@ -262,6 +272,12 @@ public class Server implements Closeable {
         .orElse(null);
   }
 
+  private static <T> T log(final Logger logger, final T obj) {
+    logger.log(FINEST, "{0}", obj);
+
+    return obj;
+  }
+
   public void close() {
     producer.close();
 
@@ -304,7 +320,8 @@ public class Server implements Closeable {
   }
 
   private String decodeUsername(final String username) {
-    return new String(decrypt(getDecoder().decode(username), fanoutSecret), UTF_8);
+    return tryWithLog(() -> new String(decrypt(getDecoder().decode(username), fanoutSecret), UTF_8))
+        .orElse(null);
   }
 
   private CompletionStage<Response> delete(final JsonObject jwt, final Path path) {
@@ -315,7 +332,9 @@ public class Server implements Closeable {
   }
 
   private String encodeUsername(final String username) {
-    return getEncoder().encodeToString(encrypt(username.getBytes(UTF_8), fanoutSecret));
+    return tryWithLog(
+            () -> getEncoder().encodeToString(encrypt(username.getBytes(UTF_8), fanoutSecret)))
+        .orElse(null);
   }
 
   private Map<String, String[]> fanoutHeaders(final String username) {
@@ -348,9 +367,13 @@ public class Server implements Closeable {
 
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
-        .map(jwt -> jwtParser.parse(jwt).getBody())
+        .flatMap(jwt -> tryWithLog(() -> jwtParser.parse(jwt).getBody()))
         .map(jwt -> (Claims) jwt)
-        .map(Json::from);
+        .map(Json::from)
+        .map(
+            j ->
+                SideEffect.<JsonObject>run(() -> logger.log(FINEST, "{0}", string(j)))
+                    .andThenGet(() -> j));
   }
 
   private CompletionStage<Response> getList(final JsonObject jwt, final Path path) {
@@ -385,11 +408,12 @@ public class Server implements Closeable {
   }
 
   private CompletionStage<Response> getSse(final JsonObject jwt) {
-    return completedFuture(
-        redirect(
-            createFanoutUri(fanoutUri, contextPath)
-                + "?u="
-                + encodeUsername(jwt.getString(JWT_SUB))));
+    final String username = jwt.getString(JWT_SUB);
+    final String uri = createFanoutUri(fanoutUri, contextPath) + "?u=" + encodeUsername(username);
+
+    logger.log(INFO, "Redirect to {0} for user {1}", new Object[] {uri, username});
+
+    return completedFuture(redirect(uri));
   }
 
   private CompletionStage<Response> getSseSetup(final Request request) {
@@ -397,7 +421,11 @@ public class Server implements Closeable {
         .map(q -> q.get("u"))
         .filter(u -> u.length == 1)
         .map(u -> decodeUsername(u[0].replace(' ', '+')))
-        .map(username -> completedFuture(ok().withHeaders(fanoutHeaders(username))))
+        .map(
+            username ->
+                SideEffect.<CompletionStage<Response>>run(
+                        () -> logger.log(INFO, "Set up fanout channel for user {0}", username))
+                    .andThenGet(() -> completedFuture(ok().withHeaders(fanoutHeaders(username)))))
         .orElseGet(() -> completedFuture(forbidden()));
   }
 
@@ -478,16 +506,24 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public CompletionStage<Response> request(final Request request) {
-    return getPath(request)
+    return getPath(log(logger, request))
         .map(
             path ->
                 path.sseSetup
                     ? getSseSetup(request)
                     : getJwt(request)
                         .filter(jwt -> jwt.containsKey(JWT_SUB))
-                        .map(jwt -> handleRequest(request, jwt, path))
+                        .map(
+                            jwt ->
+                                handleRequest(request, jwt, path)
+                                    .exceptionally(
+                                        e ->
+                                            SideEffect.<Response>run(
+                                                    () -> logger.log(SEVERE, ERROR, e))
+                                                .andThenGet(Response::internalServerError)))
                         .orElseGet(() -> completedFuture(notAuthorized())))
-        .orElseGet(() -> completedFuture(notFound()));
+        .orElseGet(() -> completedFuture(notFound()))
+        .thenApply(response -> log(logger, response));
   }
 
   /**
@@ -542,6 +578,12 @@ public class Server implements Closeable {
     return send(producer, new ProducerRecord<>(commandTopic(c), c.getString(ID), c))
         .thenApply(result -> must(result, r -> r))
         .thenApply(result -> accepted());
+  }
+
+  private <T> Optional<T> tryWithLog(final SupplierWithException<T> supplier) {
+    return tryToGet(
+        supplier,
+        e -> SideEffect.<T>run(() -> logger.log(SEVERE, ERROR, e)).andThenGet(() -> null));
   }
 
   /**
@@ -650,6 +692,19 @@ public class Server implements Closeable {
    */
   public Server withKafkaConfig(final Map<String, Object> config) {
     producer = createReliableProducer(config, new StringSerializer(), new JsonSerializer());
+
+    return this;
+  }
+
+  /**
+   * The logger.
+   *
+   * @param logger the given logger. It must not be <code>null</code>.
+   * @return The server object itself.
+   * @since 1.0.3
+   */
+  public Server withLogger(final Logger logger) {
+    this.logger = logger;
 
     return this;
   }
