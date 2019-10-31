@@ -7,6 +7,10 @@ The URL path for an aggregate always has the form ```[/context]/application/aggr
 
 When aggregates change because of a command the result is sent back through the Kafka reply topic. It is possible to push this to the client using [Server-Sent Events](https://www.w3.org/TR/eventsource/). This is done with the [fanout.io](https://fanout.io) service. The endpoint ```/sse``` is where the client should connect to. It will be redirected to the fanout.io service with the encrypted username in a URL parameter. Then fanout.io comes back to the ```/sse-setup``` endpoint, where the channel is created.
 
+Requests need to have a valid [JSON Web Token](https://jwt.io). They are taken from the bearer token in the ```Authorization``` header. Then the URL parameter ```access_token``` is tried and finally the cookie with the same name is considered.
+
+If the header ```X-Pincette-JES-OnBehalfOf``` is present and if the calling user is "system", then the value of the header will be used to add the ```_jwt``` field to the command.
+
 ## Methods
 
 |Path|Method|Description|

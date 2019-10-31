@@ -62,6 +62,7 @@ import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
 import static net.pincette.util.Json.addIf;
+import static net.pincette.util.Json.from;
 import static net.pincette.util.Json.string;
 import static net.pincette.util.Or.tryWith;
 import static net.pincette.util.PBE.decrypt;
@@ -228,14 +229,6 @@ public class Server implements Closeable {
     return stages.stream().anyMatch(stage -> stage.containsKey(MATCH));
   }
 
-  private static boolean isCorrectObject(final Request request, final String id) {
-    return Optional.ofNullable(request.body)
-        .filter(Json::isObject)
-        .map(JsonValue::asJsonObject)
-        .map(json -> id.equalsIgnoreCase(json.getString(ID)))
-        .orElse(false);
-  }
-
   private static RSAPublicKey getRSAPublicKey(final String key) {
     return tryToGetRethrow(
             () ->
@@ -276,6 +269,19 @@ public class Server implements Closeable {
     logger.log(FINEST, "{0}", obj);
 
     return obj;
+  }
+
+  private static JsonObject onBehalfOf(final JsonObject jwt, final Request request) {
+    return Optional.of(jwt.getString(JWT_SUB))
+        .filter(sub -> sub.equals("system"))
+        .map(sub -> request.headers.get("X-Pincette-JES-OnBehalfOf"))
+        .filter(value -> value.length == 1)
+        .map(value -> value[0])
+        .filter(value -> value.length() > 0)
+        .flatMap(Json::from)
+        .filter(Json::isObject)
+        .map(JsonValue::asJsonObject)
+        .orElse(jwt);
   }
 
   public void close() {
@@ -370,6 +376,8 @@ public class Server implements Closeable {
         .flatMap(jwt -> tryWithLog(() -> jwtParser.parse(jwt).getBody()))
         .map(jwt -> (Claims) jwt)
         .map(Json::from)
+        .filter(jwt -> jwt.containsKey(JWT_SUB))
+        .map(jwt -> onBehalfOf(jwt, request))
         .map(
             j ->
                 SideEffect.<JsonObject>run(() -> logger.log(FINEST, "{0}", string(j)))
@@ -449,6 +457,20 @@ public class Server implements Closeable {
 
   private boolean hasFanout() {
     return fanoutSecret != null && fanoutUri != null;
+  }
+
+  private boolean isCorrectObject(final Request request, final String id) {
+    return Optional.ofNullable(request.body)
+        .filter(Json::isObject)
+        .map(JsonValue::asJsonObject)
+        .filter(json -> json.containsKey(ID) && json.containsKey(TYPE))
+        .map(
+            json ->
+                id.equalsIgnoreCase(json.getString(ID))
+                    && getPath(request)
+                        .map(path -> path.fullType().equals(json.getString(TYPE)))
+                        .orElse(false))
+        .orElse(false);
   }
 
   private void openDatabase() {
