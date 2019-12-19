@@ -1,7 +1,6 @@
 # HTTP Handling For JSON Event Sourcing
 
-The [JSON Event Sourcing](https://github.com/wdonne/pincette-jes) solution works with [Kafka](https://kafka.apache.org) and [MongoDB](https://www.mongodb.com). The library in this package provides the HTTP handling for that environment. You can use it to easily enable that logic in a Java HTTP server solution. An example is the 
-[pincette-jes-http](https://github.com/wdonne/pincette-jes-http) repository, which uses a [Netty HTTP server](https://github.com/wdonne/pincette-netty-http) and delegates everything to this library.
+The [JSON Event Sourcing](https://github.com/json-event-sourcing/pincette-jes) solution works with [Kafka](https://kafka.apache.org) and [MongoDB](https://www.mongodb.com). The library in this package provides the HTTP handling for that environment. You can use it to easily enable that logic in a Java HTTP server solution. An example is the [pincette-jes-http](https://github.com/json-event-sourcing/pincette-jes-http) repository, which uses a [Netty HTTP server](https://github.com/json-event-sourcing/pincette-netty-http) and delegates everything to this library.
 
 The URL path for an aggregate always has the form ```[/context]/application/aggregate_type[/id]```. When the identifier is set, one specific aggregate instance is addressed. Without it the complete collection of aggregates of that type is addressed. For example, a GET would return an array of all the aggregate instances.
 

@@ -62,7 +62,6 @@ import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
 import static net.pincette.util.Json.addIf;
-import static net.pincette.util.Json.from;
 import static net.pincette.util.Json.string;
 import static net.pincette.util.Or.tryWith;
 import static net.pincette.util.PBE.decrypt;
