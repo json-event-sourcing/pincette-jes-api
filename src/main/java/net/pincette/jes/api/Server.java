@@ -10,11 +10,9 @@ import static com.mongodb.reactivestreams.client.MongoClients.create;
 import static io.jsonwebtoken.Jwts.parser;
 import static java.lang.String.join;
 import static java.net.URLDecoder.decode;
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
-import static java.util.Base64.getEncoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.logging.Level.FINEST;
@@ -56,7 +54,6 @@ import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
 import static net.pincette.rs.Source.of;
-import static net.pincette.util.Array.append;
 import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
@@ -64,8 +61,6 @@ import static net.pincette.util.Collections.map;
 import static net.pincette.util.Json.addIf;
 import static net.pincette.util.Json.string;
 import static net.pincette.util.Or.tryWith;
-import static net.pincette.util.PBE.decrypt;
-import static net.pincette.util.PBE.encrypt;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.must;
@@ -107,6 +102,10 @@ import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.jasypt.encryption.pbe.PBEStringEncryptor;
+import org.jasypt.encryption.pbe.StandardPBEStringEncryptor;
+import org.jasypt.iv.StringFixedIvGenerator;
+import org.jasypt.salt.StringFixedSaltGenerator;
 
 /**
  * This class handles all the HTTP logic for the JSON Event Sourcing library. This makes it easier
@@ -132,7 +131,6 @@ public class Server implements Closeable {
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
 
-  private final char[] salt = randomUUID().toString().toCharArray();
   private String auditTopic;
   private boolean breakingTheGlass;
   private String[] contextPath = new String[0];
@@ -324,9 +322,8 @@ public class Server implements Closeable {
         : concat(Stream.of(completeMatch(null, jwt)), result.stream()).collect(toList());
   }
 
-  private String decodeUsername(final String username) {
-    return tryWithLog(() -> new String(decrypt(getDecoder().decode(username), fanoutSecret), UTF_8))
-        .orElse(null);
+  private Optional<String> decodeUsername(final String username) {
+    return tryWithLog(() -> getEncryptor().decrypt(username));
   }
 
   private CompletionStage<Response> delete(final JsonObject jwt, final Path path) {
@@ -337,9 +334,7 @@ public class Server implements Closeable {
   }
 
   private String encodeUsername(final String username) {
-    return tryWithLog(
-            () -> getEncoder().encodeToString(encrypt(username.getBytes(UTF_8), fanoutSecret)))
-        .orElse(null);
+    return tryWithLog(() -> getEncryptor().encrypt(username)).orElse(null);
   }
 
   private Map<String, String[]> fanoutHeaders(final String username) {
@@ -368,6 +363,20 @@ public class Server implements Closeable {
   private MongoCollection<Document> getCollection(final Path path) {
     return mongoDatabase.getCollection(
         path.fullType() + (environment != null ? ("-" + environment) : ""));
+  }
+
+  private PBEStringEncryptor getEncryptor() {
+    final StandardPBEStringEncryptor encryptor = new StandardPBEStringEncryptor();
+
+    // Salt and IV are fixed because of load balancing, where /sse and /sse-setup may reach
+    // different instances.
+
+    encryptor.setSaltGenerator(new StringFixedSaltGenerator("dfg76dfb87df6g87dcv6d76f7x6tcvu7tsd"));
+    encryptor.setIvGenerator(new StringFixedIvGenerator("dsfsdf8678s6df7dsf5sf5f56sf6sd5f76s5sdh"));
+    encryptor.setPasswordCharArray(fanoutSecret);
+    encryptor.setStringOutputType("hexadecimal");
+
+    return encryptor;
   }
 
   private Optional<JsonObject> getJwt(final Request request) {
@@ -427,7 +436,7 @@ public class Server implements Closeable {
     return Optional.ofNullable(request.queryString)
         .map(q -> q.get("u"))
         .filter(u -> u.length == 1)
-        .map(u -> decodeUsername(u[0].replace(' ', '+')))
+        .flatMap(u -> decodeUsername(u[0]))
         .map(
             username ->
                 SideEffect.<CompletionStage<Response>>run(
@@ -672,7 +681,7 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public Server withFanoutSecret(final String fanoutSecret) {
-    this.fanoutSecret = append(salt, fanoutSecret.toCharArray());
+    this.fanoutSecret = fanoutSecret.toCharArray();
 
     return this;
   }
