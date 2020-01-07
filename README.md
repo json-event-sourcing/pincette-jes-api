@@ -4,7 +4,7 @@ The [JSON Event Sourcing](https://github.com/json-event-sourcing/pincette-jes) s
 
 The URL path for an aggregate always has the form ```[/context]/application/aggregate_type[/id]```. When the identifier is set, one specific aggregate instance is addressed. Without it the complete collection of aggregates of that type is addressed. For example, a GET would return an array of all the aggregate instances.
 
-When aggregates change because of a command the result is sent back through the Kafka reply topic. It is possible to push this to the client using [Server-Sent Events](https://www.w3.org/TR/eventsource/). This is done with the [fanout.io](https://fanout.io) service. The endpoint ```/sse``` is where the client should connect to. It will be redirected to the fanout.io service with the encrypted username in a URL parameter. Then fanout.io comes back to the ```/sse-setup``` endpoint, where the channel is created.
+When aggregates change because of a command the result is sent back through the Kafka reply topic. It is possible to push this to the client using [Server-Sent Events](https://www.w3.org/TR/eventsource/). This is done with the [fanout.io](https://fanout.io) service. The endpoint ```/sse``` is where the client should connect to. It will be redirected to the fanout.io service with the username and the JWT in a URL parameter. Then fanout.io comes back to the ```/sse-setup``` endpoint, where the channel is created.
 
 Requests need to have a valid [JSON Web Token](https://jwt.io). They are taken from the bearer token in the ```Authorization``` header. Then the URL parameter ```access_token``` is tried and finally the cookie with the same name is considered.
 

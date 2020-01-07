@@ -10,11 +10,11 @@ import static com.mongodb.reactivestreams.client.MongoClients.create;
 import static io.jsonwebtoken.Jwts.parser;
 import static java.lang.String.join;
 import static java.net.URLDecoder.decode;
+import static java.net.URLEncoder.encode;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
-import static java.util.Base64.getEncoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.logging.Level.FINEST;
@@ -56,7 +56,6 @@ import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
 import static net.pincette.rs.Source.of;
-import static net.pincette.util.Array.append;
 import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
@@ -64,8 +63,6 @@ import static net.pincette.util.Collections.map;
 import static net.pincette.util.Json.addIf;
 import static net.pincette.util.Json.string;
 import static net.pincette.util.Or.tryWith;
-import static net.pincette.util.PBE.decrypt;
-import static net.pincette.util.PBE.encrypt;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.must;
@@ -119,7 +116,7 @@ import org.bson.conversions.Bson;
  * <p>When aggregates change because of a command the result is sent back through the Kafka reply
  * topic. It is possible to push this to the client using Server-Sent Events. This is done with the
  * fanout.io service. The endpoint <code>/sse</code> is where the client should connect to. It will
- * be redirected to the fanout.io service with the encrypted username in a URL parameter. Then
+ * be redirected to the fanout.io service with the username and the JWT in a URL parameter. Then
  * fanout.io comes back to the <code>/sse-setup</code> endpoint, where the channel is created.
  *
  * @author Werner Donn\u00e9
@@ -132,12 +129,10 @@ public class Server implements Closeable {
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
 
-  private final char[] salt = randomUUID().toString().toCharArray();
   private String auditTopic;
   private boolean breakingTheGlass;
   private String[] contextPath = new String[0];
   private String environment;
-  private char[] fanoutSecret;
   private int fanoutTimeout = 20;
   private String fanoutUri;
   private JwtParser jwtParser;
@@ -242,7 +237,7 @@ public class Server implements Closeable {
         .or(() -> getBearerTokenFromQueryString(request))
         .or(() -> request.cookies.get(ACCESS_TOKEN))
         .get()
-        .flatMap(t -> tryToGet(() -> decode(t, "UTF-8")));
+        .flatMap(t -> tryToGet(() -> decode(t, UTF_8.name())));
   }
 
   private static String getBearerTokenFromAuthorization(final Request request) {
@@ -324,22 +319,11 @@ public class Server implements Closeable {
         : concat(Stream.of(completeMatch(null, jwt)), result.stream()).collect(toList());
   }
 
-  private String decodeUsername(final String username) {
-    return tryWithLog(() -> new String(decrypt(getDecoder().decode(username), fanoutSecret), UTF_8))
-        .orElse(null);
-  }
-
   private CompletionStage<Response> delete(final JsonObject jwt, final Path path) {
     return createCommand(DELETE, jwt, path)
         .map(JsonObjectBuilder::build)
         .map(this::sendCommand)
         .orElseGet(() -> completedFuture(notFound()));
-  }
-
-  private String encodeUsername(final String username) {
-    return tryWithLog(
-            () -> getEncoder().encodeToString(encrypt(username.getBytes(UTF_8), fanoutSecret)))
-        .orElse(null);
   }
 
   private Map<String, String[]> fanoutHeaders(final String username) {
@@ -354,7 +338,7 @@ public class Server implements Closeable {
 
   private CompletionStage<Response> get(
       final Request request, final JsonObject jwt, final Path path) {
-    return tryWith(() -> path.sse && hasFanout() ? getSse(jwt) : null)
+    return tryWith(() -> path.sse && hasFanout() ? getSse(request, jwt) : null)
         .or(() -> path.sseSetup && hasFanout() ? getSseSetup(request) : null)
         .or(
             () ->
@@ -372,15 +356,19 @@ public class Server implements Closeable {
 
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
-        .flatMap(jwt -> tryWithLog(() -> jwtParser.parse(jwt).getBody()))
-        .map(jwt -> (Claims) jwt)
-        .map(Json::from)
+        .flatMap(this::getJwt)
         .filter(jwt -> jwt.containsKey(JWT_SUB))
         .map(jwt -> onBehalfOf(jwt, request))
         .map(
             j ->
                 SideEffect.<JsonObject>run(() -> logger.log(FINEST, "{0}", string(j)))
                     .andThenGet(() -> j));
+  }
+
+  private Optional<JsonObject> getJwt(final String token) {
+    return tryWithLog(() -> jwtParser.parse(token).getBody())
+        .map(jwt -> (Claims) jwt)
+        .map(Json::from);
   }
 
   private CompletionStage<Response> getList(final JsonObject jwt, final Path path) {
@@ -414,11 +402,21 @@ public class Server implements Closeable {
         .filter(path -> path.valid);
   }
 
-  private CompletionStage<Response> getSse(final JsonObject jwt) {
+  private CompletionStage<Response> getSse(final Request request, final JsonObject jwt) {
     final String username = jwt.getString(JWT_SUB);
-    final String uri = createFanoutUri(fanoutUri, contextPath) + "?u=" + encodeUsername(username);
+    final String uri =
+        createFanoutUri(fanoutUri, contextPath)
+            + "?u="
+            + tryToGetRethrow(() -> encode(username, UTF_8.name())).orElse("")
+            + ":"
+            + getBearerToken(request)
+                .flatMap(token -> tryToGetRethrow(() -> encode(token, UTF_8.name())))
+                .orElse("");
 
-    logger.log(INFO, "Redirect to {0} for user {1}", new Object[] {uri, username});
+    logger.log(
+        INFO,
+        "Redirect to {0} for user {1}",
+        new Object[] {uri.substring(0, uri.lastIndexOf(':')), username});
 
     return completedFuture(redirect(uri));
   }
@@ -427,7 +425,9 @@ public class Server implements Closeable {
     return Optional.ofNullable(request.queryString)
         .map(q -> q.get("u"))
         .filter(u -> u.length == 1)
-        .map(u -> decodeUsername(u[0].replace(' ', '+')))
+        .map(u -> u[0].split(":"))
+        .filter(tokens -> tokens.length == 2)
+        .flatMap(tokens -> getJwt(tokens[1]).map(jwt -> tokens[0]))
         .map(
             username ->
                 SideEffect.<CompletionStage<Response>>run(
@@ -455,7 +455,7 @@ public class Server implements Closeable {
   }
 
   private boolean hasFanout() {
-    return fanoutSecret != null && fanoutUri != null;
+    return fanoutUri != null;
   }
 
   private boolean isCorrectObject(final Request request, final String id) {
@@ -659,20 +659,6 @@ public class Server implements Closeable {
    */
   public Server withEnvironment(final String environment) {
     this.environment = environment;
-
-    return this;
-  }
-
-  /**
-   * This is the secret used to encrypt the username in the Server-Sent Event set-up with the
-   * fanout.io service. It must not be <code>null</code>.
-   *
-   * @param fanoutSecret the given secret.
-   * @return The server object itself.
-   * @since 1.0
-   */
-  public Server withFanoutSecret(final String fanoutSecret) {
-    this.fanoutSecret = append(salt, fanoutSecret.toCharArray());
 
     return this;
   }
