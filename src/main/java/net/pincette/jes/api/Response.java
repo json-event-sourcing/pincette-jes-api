@@ -26,6 +26,13 @@ public class Response {
   public final Publisher<JsonObject> body;
 
   /**
+   * The exception if one has occurred.
+   *
+   * @since 1.1
+   */
+  public final Throwable exception;
+
+  /**
    * The response headers. When there are no headers the map will be empty.
    *
    * @since 1.0
@@ -40,14 +47,18 @@ public class Response {
   public final int statusCode;
 
   private Response(final int statusCode) {
-    this(statusCode, null, null);
+    this(statusCode, null, null, null);
   }
 
-  private Response(
-      final int statusCode, final Map<String, String[]> headers, final Publisher<JsonObject> body) {
+  Response(
+      final int statusCode,
+      final Map<String, String[]> headers,
+      final Publisher<JsonObject> body,
+      final Throwable exception) {
     this.statusCode = statusCode;
     this.headers = headers != null ? headers : new HashMap<>();
     this.body = body;
+    this.exception = exception;
   }
 
   public static Response accepted() {
@@ -87,7 +98,7 @@ public class Response {
   }
 
   public static Response redirect(final String location) {
-    return new Response(303, map(pair("Location", new String[] {location})), null);
+    return new Response(303, map(pair("Location", new String[] {location})), null, null);
   }
 
   public String toString() {
@@ -95,10 +106,14 @@ public class Response {
   }
 
   public Response withBody(final Publisher<JsonObject> body) {
-    return new Response(statusCode, headers, body);
+    return new Response(statusCode, headers, body, null);
+  }
+
+  public Response withException(final Throwable exception) {
+    return new Response(statusCode, headers, body, exception);
   }
 
   public Response withHeaders(final Map<String, String[]> headers) {
-    return new Response(statusCode, headers, body);
+    return new Response(statusCode, headers, body, null);
   }
 }

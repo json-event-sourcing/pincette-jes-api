@@ -1,13 +1,12 @@
 package net.pincette.jes.api;
 
-import static java.lang.String.join;
 import static java.net.URLDecoder.decode;
 import static java.util.Arrays.stream;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static net.pincette.jes.api.Util.headersToString;
-import static net.pincette.util.Json.string;
+import static net.pincette.json.JsonUtil.string;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.isFloat;
 import static net.pincette.util.Util.tryToGetSilent;
@@ -87,16 +86,25 @@ public class Request {
    */
   public final Map<String, String[]> queryString;
 
+  /**
+   * The original URI of the request.
+   *
+   * @since 1.1
+   */
+  public final String uri;
+
   public Request() {
-    this(null, null, null, null, null);
+    this(null, null, null, null, null, null);
   }
 
   private Request(
+      final String uri,
       final Map<String, String[]> headers,
       final String path,
       final String method,
       final JsonStructure body,
       final Map<String, String[]> queryString) {
+    this.uri = uri;
     this.headers = headers != null ? headers : new HashMap<>();
     this.path = path;
     this.method = method != null ? method.toUpperCase() : null;
@@ -186,23 +194,27 @@ public class Request {
   }
 
   public Request withBody(final JsonStructure body) {
-    return new Request(headers, path, method, body, queryString);
+    return new Request(uri, headers, path, method, body, queryString);
   }
 
   public Request withHeaders(final Map<String, String[]> headers) {
-    return new Request(headers, path, method, body, queryString);
+    return new Request(uri, headers, path, method, body, queryString);
   }
 
   public Request withMethod(final String method) {
-    return new Request(headers, path, method, body, queryString);
+    return new Request(uri, headers, path, method, body, queryString);
   }
 
   public Request withPath(final String path) {
-    return new Request(headers, path, method, body, queryString);
+    return new Request(uri, headers, path, method, body, queryString);
   }
 
   public Request withQueryString(final String queryString) {
     return new Request(
-        headers, path, method, body, queryString != null ? getQueryString(queryString) : null);
+        uri, headers, path, method, body, queryString != null ? getQueryString(queryString) : null);
+  }
+
+  public Request withUri(final String uri) {
+    return new Request(uri, headers, path, method, body, queryString);
   }
 }

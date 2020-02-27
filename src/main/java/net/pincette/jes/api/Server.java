@@ -7,14 +7,16 @@ import static com.mongodb.client.model.Filters.in;
 import static com.mongodb.client.model.Filters.not;
 import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
-import static io.jsonwebtoken.Jwts.parser;
+import static io.jsonwebtoken.Jwts.parserBuilder;
 import static java.lang.String.join;
+import static java.lang.String.valueOf;
 import static java.net.URLDecoder.decode;
 import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.runAsync;
 import static java.util.logging.Level.FINEST;
 import static java.util.logging.Level.INFO;
 import static java.util.logging.Level.SEVERE;
@@ -26,6 +28,7 @@ import static javax.json.Json.createObjectBuilder;
 import static net.pincette.jes.api.Response.accepted;
 import static net.pincette.jes.api.Response.badRequest;
 import static net.pincette.jes.api.Response.forbidden;
+import static net.pincette.jes.api.Response.internalServerError;
 import static net.pincette.jes.api.Response.notAuthorized;
 import static net.pincette.jes.api.Response.notFound;
 import static net.pincette.jes.api.Response.notImplemented;
@@ -49,6 +52,8 @@ import static net.pincette.jes.util.JsonFields.TYPE;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
 import static net.pincette.jes.util.Mongo.NOT_DELETED;
+import static net.pincette.json.JsonUtil.addIf;
+import static net.pincette.json.JsonUtil.string;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
@@ -58,14 +63,13 @@ import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
-import static net.pincette.util.Json.addIf;
-import static net.pincette.util.Json.string;
 import static net.pincette.util.Or.tryWith;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.must;
 import static net.pincette.util.Util.tryToGet;
 import static net.pincette.util.Util.tryToGetRethrow;
+import static net.pincette.util.Util.tryToGetSilent;
 
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
@@ -73,8 +77,10 @@ import com.mongodb.reactivestreams.client.MongoDatabase;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtParser;
 import java.io.Closeable;
+import java.net.URI;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,6 +88,7 @@ import java.util.Set;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 import javax.json.JsonArray;
@@ -91,10 +98,16 @@ import javax.json.JsonString;
 import javax.json.JsonValue;
 import net.pincette.function.SideEffect;
 import net.pincette.function.SupplierWithException;
+import net.pincette.jes.elastic.ElasticCommonSchema;
+import net.pincette.jes.elastic.ElasticCommonSchema.Builder;
+import net.pincette.jes.elastic.ElasticCommonSchema.ErrorBuilder;
+import net.pincette.jes.elastic.ElasticCommonSchema.EventBuilder;
+import net.pincette.jes.elastic.ElasticCommonSchema.UrlBuilder;
 import net.pincette.jes.util.AuditFields;
 import net.pincette.jes.util.JsonSerializer;
+import net.pincette.json.JsonUtil;
 import net.pincette.mongo.BsonUtil;
-import net.pincette.util.Json;
+import net.pincette.util.Collections;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -130,21 +143,25 @@ public class Server implements Closeable {
   private static final String MATCH = "$match";
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
+  private static final String UNKNOWN = "UNKNOWN";
 
   private String auditTopic;
   private boolean breakingTheGlass;
   private String[] contextPath = new String[0];
+  private ElasticCommonSchema ecs;
   private String environment;
   private char[] fanoutSecret;
   private int fanoutTimeout = 20;
   private String fanoutUri;
   private JwtParser jwtParser;
+  private String logTopic;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
   private MongoDatabase mongoDatabase;
   private String mongoDatabaseName;
   private KafkaProducer<String, JsonObject> producer;
   private BiPredicate<JsonObject, JsonObject> responseFilter = (json, jwt) -> true;
+  private String serviceVersion;
 
   private static Bson aclQuery(final JsonObject jwt) {
     return or(not(exists(ACL)), in(ACL + "." + ACL_GET, getRoles(jwt)));
@@ -202,37 +219,10 @@ public class Server implements Closeable {
 
   private static List<BsonDocument> fromJson(final JsonArray array) {
     return array.stream()
-        .filter(Json::isObject)
+        .filter(JsonUtil::isObject)
         .map(BsonUtil::fromJson)
         .map(BsonValue::asDocument)
         .collect(toList());
-  }
-
-  private static Set<String> getRoles(final JsonObject jwt) {
-    return concat(
-            Optional.ofNullable(jwt.getJsonArray(JWT_ROLES))
-                .map(
-                    a ->
-                        a.stream()
-                            .filter(Json::isString)
-                            .map(Json::asString)
-                            .map(JsonString::getString))
-                .orElseGet(Stream::empty),
-            Stream.of(jwt.getString(JWT_SUB)))
-        .collect(toSet());
-  }
-
-  private static boolean hasMatch(final List<BsonDocument> stages) {
-    return stages.stream().anyMatch(stage -> stage.containsKey(MATCH));
-  }
-
-  private static RSAPublicKey getRSAPublicKey(final String key) {
-    return tryToGetRethrow(
-            () ->
-                (RSAPublicKey)
-                    getInstance("RSA")
-                        .generatePublic(new X509EncodedKeySpec(getDecoder().decode(key))))
-        .orElse(null);
   }
 
   private static Optional<String> getBearerToken(final Request request) {
@@ -262,6 +252,84 @@ public class Server implements Closeable {
         .orElse(null);
   }
 
+  private static Optional<String> getCorr(final Request request) {
+    return Optional.ofNullable(request.body)
+        .filter(JsonUtil::isObject)
+        .map(JsonValue::asJsonObject)
+        .map(json -> json.getString(CORR, null))
+        .map(String::toLowerCase);
+  }
+
+  private static Optional<String> getDomain(final Request request) {
+    return getUri(request)
+        .map(URI::getAuthority)
+        .map(authority -> pair(authority, authority.indexOf('@')))
+        .map(pair -> pair.second != -1 ? pair.first.substring(pair.second + 1) : pair.first);
+  }
+
+  private static Optional<String> getExtension(final Request request) {
+    return getUriPath(request).flatMap(Server::getExtension);
+  }
+
+  private static Optional<String> getExtension(final String s) {
+    return Optional.of(s.lastIndexOf('.')).filter(i -> i != -1).map(i -> s.substring(i + 1));
+  }
+
+  private static Optional<String> getFragment(final Request request) {
+    return getUri(request).map(URI::getFragment);
+  }
+
+  private static Optional<Integer> getPort(final Request request) {
+    return getUri(request).map(URI::getPort).filter(port -> port != -1);
+  }
+
+  private static Optional<String> getQuery(final Request request) {
+    return getUri(request).map(URI::getQuery);
+  }
+
+  private static Set<String> getRoles(final JsonObject jwt) {
+    return concat(
+            Optional.ofNullable(jwt.getJsonArray(JWT_ROLES))
+                .map(
+                    a ->
+                        a.stream()
+                            .filter(JsonUtil::isString)
+                            .map(JsonUtil::asString)
+                            .map(JsonString::getString))
+                .orElseGet(Stream::empty),
+            Stream.of(jwt.getString(JWT_SUB)))
+        .collect(toSet());
+  }
+
+  private static RSAPublicKey getRSAPublicKey(final String key) {
+    return tryToGetRethrow(
+            () ->
+                (RSAPublicKey)
+                    getInstance("RSA")
+                        .generatePublic(new X509EncodedKeySpec(getDecoder().decode(key))))
+        .orElse(null);
+  }
+
+  private static Optional<String> getScheme(final Request request) {
+    return getUri(request).map(URI::getScheme);
+  }
+
+  private static Optional<String> getTopLevelDomain(final Request request) {
+    return getDomain(request).map(domain -> getExtension(domain).orElse(domain));
+  }
+
+  private static Optional<URI> getUri(final Request request) {
+    return Optional.ofNullable(request.uri).flatMap(uri -> tryToGetSilent(() -> new URI(uri)));
+  }
+
+  private static Optional<String> getUriPath(final Request request) {
+    return getUri(request).map(URI::getPath);
+  }
+
+  private static boolean hasMatch(final List<BsonDocument> stages) {
+    return stages.stream().anyMatch(stage -> stage.containsKey(MATCH));
+  }
+
   private static <T> T log(final Logger logger, final T obj) {
     logger.log(FINEST, "{0}", obj);
 
@@ -275,8 +343,8 @@ public class Server implements Closeable {
         .filter(value -> value.length == 1)
         .map(value -> value[0])
         .filter(value -> value.length() > 0)
-        .flatMap(Json::from)
-        .filter(Json::isObject)
+        .flatMap(JsonUtil::from)
+        .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .orElse(jwt);
   }
@@ -322,6 +390,53 @@ public class Server implements Closeable {
         : concat(Stream.of(completeMatch(null, jwt)), result.stream()).collect(toList());
   }
 
+  private JsonObject createLogMessage(
+      final Request request, final Response response, final Instant started, final JsonObject jwt) {
+    final Instant ended = now();
+    final String method = request.method != null ? request.method : UNKNOWN;
+    final String user = Optional.ofNullable(jwt.getString(JWT_SUB, null)).orElse("anonymous");
+
+    return ecs()
+        .builder()
+        .addUser(user)
+        .addIf(() -> getCorr(request), Builder::addTrace)
+        .addEvent()
+        .addAction(method)
+        .addDataset(getPath(request).map(Path::fullType).orElse(UNKNOWN))
+        .addDuration(ended.toEpochMilli() - started.toEpochMilli())
+        .addCreated(started)
+        .addStart(started)
+        .addEnd(ended)
+        .addIf(b -> response.statusCode >= 400, EventBuilder::addFailure)
+        .build()
+        .addIf(
+            b -> response.statusCode >= 400 || response.exception != null,
+            b ->
+                b.addError()
+                    .addCode(valueOf(response.statusCode))
+                    .addIf(
+                        () -> Optional.ofNullable(response.exception), ErrorBuilder::addThrowable)
+                    .build())
+        .addHttp()
+        .addMethod(method)
+        .addStatusCode(response.statusCode)
+        .addIf(b -> request.body != null, b -> b.addRequestBodyContent(string(request.body)))
+        .build()
+        .addUrl()
+        .addUsername(user)
+        .addIf(b -> request.uri != null, b -> b.addFull(request.uri).addOriginal(request.uri))
+        .addIf(() -> getDomain(request), UrlBuilder::addDomain)
+        .addIf(() -> getExtension(request), UrlBuilder::addExtension)
+        .addIf(() -> getFragment(request), UrlBuilder::addFragment)
+        .addIf(() -> getPort(request), UrlBuilder::addPort)
+        .addIf(() -> getQuery(request), UrlBuilder::addQuery)
+        .addIf(() -> getScheme(request), UrlBuilder::addScheme)
+        .addIf(() -> getTopLevelDomain(request), UrlBuilder::addTopLevelDomain)
+        .addIf(() -> getUriPath(request), UrlBuilder::addPath)
+        .build()
+        .build();
+  }
+
   private Optional<String> decodeUsername(final String username) {
     return tryWithLog(() -> getEncryptor().decrypt(username));
   }
@@ -335,6 +450,21 @@ public class Server implements Closeable {
 
   private String encodeUsername(final String username) {
     return tryWithLog(() -> getEncryptor().encrypt(username)).orElse(null);
+  }
+
+  private ElasticCommonSchema ecs() {
+    return ecs != null
+        ? ecs
+        : SideEffect.<ElasticCommonSchema>run(
+                () ->
+                    ecs =
+                        new ElasticCommonSchema()
+                            .withApp(logger.getName())
+                            .withService(logger.getName())
+                            .withLogLevel(logger.getLevel())
+                            .withEnvironment(environment)
+                            .withServiceVersion(serviceVersion))
+            .andThenGet(() -> ecs);
   }
 
   private Map<String, String[]> fanoutHeaders(final String username) {
@@ -381,9 +511,9 @@ public class Server implements Closeable {
 
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
-        .flatMap(jwt -> tryWithLog(() -> jwtParser.parse(jwt).getBody()))
+        .flatMap(jwt -> tryToGetSilent(() -> jwtParser.parse(jwt).getBody()))
         .map(jwt -> (Claims) jwt)
-        .map(Json::from)
+        .map(JsonUtil::from)
         .filter(jwt -> jwt.containsKey(JWT_SUB))
         .map(jwt -> onBehalfOf(jwt, request))
         .map(
@@ -469,7 +599,7 @@ public class Server implements Closeable {
 
   private boolean isCorrectObject(final Request request, final String id) {
     return Optional.ofNullable(request.body)
-        .filter(Json::isObject)
+        .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .filter(json -> json.containsKey(ID) && json.containsKey(TYPE))
         .map(
@@ -479,6 +609,36 @@ public class Server implements Closeable {
                         .map(path -> path.fullType().equals(json.getString(TYPE)))
                         .orElse(false))
         .orElse(false);
+  }
+
+  private Response log(
+      final Request request, final Response response, final Instant started, final JsonObject jwt) {
+    final Runnable emit =
+        () ->
+            runAsync(
+                () ->
+                    producer.send(
+                        new ProducerRecord<>(
+                            logTopic,
+                            randomUUID().toString(),
+                            createLogMessage(request, response, started, jwt)),
+                        (m, e) -> {}));
+
+    final Supplier<Response> tryWithBody =
+        () ->
+            response.body != null
+                ? new Response(
+                    response.statusCode,
+                    response.headers,
+                    with(response.body)
+                        .after(() -> SideEffect.<JsonObject>run(emit).andThenGet(() -> null))
+                        .get(),
+                    response.exception)
+                : SideEffect.<Response>run(emit).andThenGet(() -> response);
+
+    return logTopic != null && logger.getLevel().intValue() <= INFO.intValue()
+        ? tryWithBody.get()
+        : response;
   }
 
   private void openDatabase() {
@@ -493,7 +653,7 @@ public class Server implements Closeable {
         .map(
             id ->
                 Optional.ofNullable(request.body)
-                    .filter(Json::isArray)
+                    .filter(JsonUtil::isArray)
                     .flatMap(
                         body ->
                             createCommand(PATCH, jwt, path)
@@ -536,6 +696,8 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public CompletionStage<Response> request(final Request request) {
+    final Instant started = now();
+
     return getPath(log(logger, request))
         .map(
             path ->
@@ -550,7 +712,9 @@ public class Server implements Closeable {
                                         e ->
                                             SideEffect.<Response>run(
                                                     () -> logger.log(SEVERE, ERROR, e))
-                                                .andThenGet(Response::internalServerError)))
+                                                .andThenGet(
+                                                    () -> internalServerError().withException(e)))
+                                    .thenApply(response -> log(request, response, started, jwt)))
                         .orElseGet(() -> completedFuture(notAuthorized())))
         .orElseGet(() -> completedFuture(notFound()))
         .thenApply(response -> log(logger, response));
@@ -572,7 +736,7 @@ public class Server implements Closeable {
   private CompletionStage<Response> search(
       final Request request, final JsonObject jwt, final Path path) {
     return Optional.ofNullable(request.body)
-        .filter(Json::isArray)
+        .filter(JsonUtil::isArray)
         .map(JsonValue::asJsonArray)
         .map(stages -> pair(fromJson(stages), string(stages)))
         .map(pair -> pair(completeQuery(pair.first, jwt), pair.second))
@@ -721,7 +885,26 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public Server withKafkaConfig(final Map<String, Object> config) {
-    producer = createReliableProducer(config, new StringSerializer(), new JsonSerializer());
+    producer =
+        createReliableProducer(
+            Collections.put(config, "client.id", randomUUID().toString()),
+            new StringSerializer(),
+            new JsonSerializer());
+
+    return this;
+  }
+
+  /**
+   * The Kafka log topic. When set requests will be logged in the Elastic Common Schema.
+   *
+   * @param logTopic the given log topic.
+   * @return The server object itself.
+   * @see <a href="https://www.elastic.co/guide/en/ecs/current/ecs-field-reference.html">ECS Field
+   *     Reference</a>
+   * @since 1.1
+   */
+  public Server withLogTopic(final String logTopic) {
+    this.logTopic = logTopic;
 
     return this;
   }
@@ -775,7 +958,7 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public Server withJwtPublicKey(final String key) {
-    jwtParser = parser().setSigningKey(getRSAPublicKey(key));
+    jwtParser = parserBuilder().setSigningKey(getRSAPublicKey(key)).build();
 
     return this;
   }
@@ -789,6 +972,19 @@ public class Server implements Closeable {
    */
   public Server withResponseFilter(final BiPredicate<JsonObject, JsonObject> responseFilter) {
     this.responseFilter = responseFilter;
+
+    return this;
+  }
+
+  /**
+   * The service version. This will be used in ECS logging.
+   *
+   * @param serviceVersion the given service version.
+   * @return The server object itself.
+   * @since 1.1
+   */
+  public Server withServiceVersion(final String serviceVersion) {
+    this.serviceVersion = serviceVersion;
 
     return this;
   }
