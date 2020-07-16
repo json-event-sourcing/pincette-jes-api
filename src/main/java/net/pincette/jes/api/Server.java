@@ -24,7 +24,6 @@ import static java.util.logging.Logger.getGlobal;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
 import static java.util.stream.Stream.concat;
-import static javax.json.Json.createObjectBuilder;
 import static net.pincette.jes.api.Response.accepted;
 import static net.pincette.jes.api.Response.badRequest;
 import static net.pincette.jes.api.Response.forbidden;
@@ -44,15 +43,16 @@ import static net.pincette.jes.util.JsonFields.CORR;
 import static net.pincette.jes.util.JsonFields.ID;
 import static net.pincette.jes.util.JsonFields.JWT;
 import static net.pincette.jes.util.JsonFields.JWT_BREAKING_THE_GLASS;
-import static net.pincette.jes.util.JsonFields.JWT_ROLES;
-import static net.pincette.jes.util.JsonFields.JWT_SUB;
 import static net.pincette.jes.util.JsonFields.OPS;
+import static net.pincette.jes.util.JsonFields.ROLES;
+import static net.pincette.jes.util.JsonFields.SUB;
 import static net.pincette.jes.util.JsonFields.TIMESTAMP;
 import static net.pincette.jes.util.JsonFields.TYPE;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
 import static net.pincette.jes.util.Mongo.NOT_DELETED;
 import static net.pincette.json.JsonUtil.addIf;
+import static net.pincette.json.JsonUtil.createObjectBuilder;
 import static net.pincette.json.JsonUtil.string;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
@@ -187,7 +187,7 @@ public class Server implements Closeable {
                 .add(AuditFields.TIMESTAMP, now().toEpochMilli())
                 .add(
                     AuditFields.USER,
-                    Optional.ofNullable(jwt.getString(JWT_SUB, null)).orElse("anonymous"))
+                    Optional.ofNullable(jwt.getString(SUB, null)).orElse("anonymous"))
                 .add(AuditFields.BREAKING_THE_GLASS, jwt.getBoolean(JWT_BREAKING_THE_GLASS, false)),
             () -> path.id != null,
             b -> b.add(AuditFields.AGGREGATE, path.id))
@@ -289,7 +289,7 @@ public class Server implements Closeable {
 
   private static Set<String> getRoles(final JsonObject jwt) {
     return concat(
-            Optional.ofNullable(jwt.getJsonArray(JWT_ROLES))
+            Optional.ofNullable(jwt.getJsonArray(ROLES))
                 .map(
                     a ->
                         a.stream()
@@ -297,7 +297,7 @@ public class Server implements Closeable {
                             .map(JsonUtil::asString)
                             .map(JsonString::getString))
                 .orElseGet(Stream::empty),
-            Stream.of(jwt.getString(JWT_SUB)))
+            Stream.of(jwt.getString(SUB)))
         .collect(toSet());
   }
 
@@ -337,7 +337,7 @@ public class Server implements Closeable {
   }
 
   private static JsonObject onBehalfOf(final JsonObject jwt, final Request request) {
-    return Optional.of(jwt.getString(JWT_SUB))
+    return Optional.of(jwt.getString(SUB))
         .filter(sub -> sub.equals("system"))
         .map(sub -> request.headers.get("X-Pincette-JES-OnBehalfOf"))
         .filter(value -> value.length == 1)
@@ -370,7 +370,7 @@ public class Server implements Closeable {
         create(() -> list(NOT_DELETED))
             .updateIf(
                 l ->
-                    !jwt.getString(JWT_SUB).equals("system")
+                    !jwt.getString(SUB).equals("system")
                         && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false)),
                 l -> l.add(aclQuery(jwt)))
             .updateIf(l -> original != null, l -> l.add(original))
@@ -394,7 +394,7 @@ public class Server implements Closeable {
       final Request request, final Response response, final Instant started, final JsonObject jwt) {
     final Instant ended = now();
     final String method = request.method != null ? request.method : UNKNOWN;
-    final String user = Optional.ofNullable(jwt.getString(JWT_SUB, null)).orElse("anonymous");
+    final String user = Optional.ofNullable(jwt.getString(SUB, null)).orElse("anonymous");
 
     return ecs()
         .builder()
@@ -514,7 +514,7 @@ public class Server implements Closeable {
         .flatMap(jwt -> tryToGetSilent(() -> jwtParser.parse(jwt).getBody()))
         .map(jwt -> (Claims) jwt)
         .map(JsonUtil::from)
-        .filter(jwt -> jwt.containsKey(JWT_SUB))
+        .filter(jwt -> jwt.containsKey(SUB))
         .map(jwt -> onBehalfOf(jwt, request))
         .map(
             j ->
@@ -554,7 +554,7 @@ public class Server implements Closeable {
   }
 
   private CompletionStage<Response> getSse(final JsonObject jwt) {
-    final String username = jwt.getString(JWT_SUB);
+    final String username = jwt.getString(SUB);
     final String uri = createFanoutUri(fanoutUri, contextPath) + "?u=" + encodeUsername(username);
 
     logger.log(INFO, "Redirect to {0} for user {1}", new Object[] {uri, username});
@@ -704,7 +704,7 @@ public class Server implements Closeable {
                 path.sseSetup
                     ? getSseSetup(request)
                     : getJwt(request)
-                        .filter(jwt -> jwt.containsKey(JWT_SUB))
+                        .filter(jwt -> jwt.containsKey(SUB))
                         .map(
                             jwt ->
                                 handleRequest(request, jwt, path)
