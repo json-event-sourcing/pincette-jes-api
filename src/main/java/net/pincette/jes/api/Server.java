@@ -141,6 +141,7 @@ public class Server implements Closeable {
   private static final String ACCESS_TOKEN = "access_token";
   private static final String ERROR = "ERROR";
   private static final String MATCH = "$match";
+  private static final int RESULT_SET_BUFFER = 100;
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
   private static final String UNKNOWN = "UNKNOWN";
@@ -509,10 +510,11 @@ public class Server implements Closeable {
     return encryptor;
   }
 
+  @SuppressWarnings("java:S5659") // That is the responsibility of the user of the class.
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
         .flatMap(jwt -> tryToGetSilent(() -> jwtParser.parse(jwt).getBody()))
-        .map(jwt -> (Claims) jwt)
+        .map(Claims.class::cast)
         .map(JsonUtil::from)
         .filter(jwt -> jwt.containsKey(SUB))
         .map(jwt -> onBehalfOf(jwt, request))
@@ -529,6 +531,7 @@ public class Server implements Closeable {
                 ok().withBody(
                         with(getCollection(path)
                                 .find(completeQuery((Bson) null, jwt), BsonDocument.class))
+                            .buffer(RESULT_SET_BUFFER)
                             .map(BsonUtil::fromBson)
                             .filter(json -> responseFilter.test(json, jwt))
                             .get()));
@@ -748,6 +751,7 @@ public class Server implements Closeable {
                             ok().withBody(
                                     with(getCollection(path)
                                             .aggregate(pair.first, BsonDocument.class))
+                                        .buffer(RESULT_SET_BUFFER)
                                         .map(BsonUtil::fromBson)
                                         .filter(json -> responseFilter.test(json, jwt))
                                         .get())))
