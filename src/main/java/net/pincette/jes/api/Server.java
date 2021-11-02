@@ -1,5 +1,7 @@
 package net.pincette.jes.api;
 
+import static com.auth0.jwt.JWT.require;
+import static com.auth0.jwt.algorithms.Algorithm.RSA512;
 import static com.mongodb.client.model.Filters.and;
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.exists;
@@ -7,10 +9,10 @@ import static com.mongodb.client.model.Filters.in;
 import static com.mongodb.client.model.Filters.not;
 import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
-import static io.jsonwebtoken.Jwts.parserBuilder;
 import static java.lang.String.join;
 import static java.lang.String.valueOf;
 import static java.net.URLDecoder.decode;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
@@ -71,11 +73,11 @@ import static net.pincette.util.Util.tryToGet;
 import static net.pincette.util.Util.tryToGetRethrow;
 import static net.pincette.util.Util.tryToGetSilent;
 
+import com.auth0.jwt.JWTVerifier;
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.JwtParser;
 import java.io.Closeable;
 import java.net.URI;
 import java.security.interfaces.RSAPublicKey;
@@ -154,7 +156,7 @@ public class Server implements Closeable {
   private char[] fanoutSecret;
   private int fanoutTimeout = 20;
   private String fanoutUri;
-  private JwtParser jwtParser;
+  private JWTVerifier jwtVerifier;
   private String logTopic;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
@@ -231,7 +233,7 @@ public class Server implements Closeable {
         .or(() -> getBearerTokenFromQueryString(request))
         .or(() -> request.cookies.get(ACCESS_TOKEN))
         .get()
-        .flatMap(t -> tryToGet(() -> decode(t, "UTF-8")));
+        .flatMap(t -> tryToGet(() -> decode(t, UTF_8)));
   }
 
   private static String getBearerTokenFromAuthorization(final Request request) {
@@ -510,12 +512,14 @@ public class Server implements Closeable {
     return encryptor;
   }
 
-  @SuppressWarnings("java:S5659") // That is the responsibility of the user of the class.
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
-        .flatMap(jwt -> tryToGetSilent(() -> jwtParser.parse(jwt).getBody()))
-        .map(Claims.class::cast)
-        .map(JsonUtil::from)
+        .map(jwtVerifier::verify)
+        .map(DecodedJWT::getPayload)
+        .map(jwt -> new String(getDecoder().decode(jwt), UTF_8))
+        .flatMap(JsonUtil::from)
+        .filter(JsonUtil::isObject)
+        .map(JsonValue::asJsonObject)
         .filter(jwt -> jwt.containsKey(SUB))
         .map(jwt -> onBehalfOf(jwt, request))
         .map(
@@ -962,7 +966,7 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public Server withJwtPublicKey(final String key) {
-    jwtParser = parserBuilder().setSigningKey(getRSAPublicKey(key)).build();
+    jwtVerifier = require(RSA512(getRSAPublicKey(key), null)).build();
 
     return this;
   }

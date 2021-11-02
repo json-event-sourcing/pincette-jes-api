@@ -1,6 +1,7 @@
 package net.pincette.jes.api;
 
 import static java.net.URLDecoder.decode;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.stream;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
@@ -116,7 +117,7 @@ public class Request {
   }
 
   private static int compareWeighted(final Pair<String, Float> w1, final Pair<String, Float> w2) {
-    final IntSupplier equalOr = () -> w1.second.floatValue() == w2.second.floatValue() ? 0 : 1;
+    final IntSupplier equalOr = () -> w1.second.equals(w2.second) ? 0 : 1;
 
     return w1.second >= w2.second ? -1 : equalOr.getAsInt();
   }
@@ -147,7 +148,7 @@ public class Request {
         .collect(
             toMap(
                 s -> s[0],
-                s -> new String[] {tryToGetSilent(() -> decode(s[1], "UTF-8")).orElse(s[1])},
+                s -> new String[] {tryToGetSilent(() -> decode(s[1], UTF_8)).orElse(s[1])},
                 Array::append));
   }
 
