@@ -1,6 +1,8 @@
 package net.pincette.jes.api;
 
 import static com.auth0.jwt.JWT.require;
+import static com.auth0.jwt.algorithms.Algorithm.RSA256;
+import static com.auth0.jwt.algorithms.Algorithm.RSA384;
 import static com.auth0.jwt.algorithms.Algorithm.RSA512;
 import static com.mongodb.client.model.Filters.and;
 import static com.mongodb.client.model.Filters.eq;
@@ -156,7 +158,9 @@ public class Server implements Closeable {
   private char[] fanoutSecret;
   private int fanoutTimeout = 20;
   private String fanoutUri;
-  private JWTVerifier jwtVerifier;
+  private JWTVerifier jwtVerifier256;
+  private JWTVerifier jwtVerifier384;
+  private JWTVerifier jwtVerifier512;
   private String logTopic;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
@@ -514,7 +518,8 @@ public class Server implements Closeable {
 
   private Optional<JsonObject> getJwt(final Request request) {
     return getBearerToken(request)
-        .map(jwtVerifier::verify)
+        .map(com.auth0.jwt.JWT::decode)
+        .map(this::verifyJwt)
         .map(DecodedJWT::getPayload)
         .map(jwt -> new String(getDecoder().decode(jwt), UTF_8))
         .flatMap(JsonUtil::from)
@@ -762,6 +767,17 @@ public class Server implements Closeable {
         .orElseGet(() -> completedFuture(badRequest()));
   }
 
+  private JWTVerifier selectVerifier(final String algorithm) {
+    switch (algorithm) {
+      case "RS384":
+        return jwtVerifier384;
+      case "RS512":
+        return jwtVerifier512;
+      default:
+        return jwtVerifier256;
+    }
+  }
+
   private CompletionStage<Boolean> sendAudit(
       final JsonObject jwt, final Path path, final String command) {
     final String key = path.id != null ? path.id : path.fullType();
@@ -786,6 +802,10 @@ public class Server implements Closeable {
     return tryToGet(
         supplier,
         e -> SideEffect.<T>run(() -> logger.log(SEVERE, ERROR, e)).andThenGet(() -> null));
+  }
+
+  private DecodedJWT verifyJwt(final DecodedJWT jwt) {
+    return selectVerifier(jwt.getAlgorithm()).verify(jwt);
   }
 
   /**
@@ -959,14 +979,18 @@ public class Server implements Closeable {
   }
 
   /**
-   * The public key with which all JSON Web Tokens are validated.
+   * The public key with which all JSON Web Tokens are validated. It assumes RSA.
    *
    * @param key the given public key. It must not be <code>null</code>.
    * @return The server object itself.
    * @since 1.0
    */
   public Server withJwtPublicKey(final String key) {
-    jwtVerifier = require(RSA512(getRSAPublicKey(key), null)).build();
+    final RSAPublicKey publicKey = getRSAPublicKey(key);
+
+    jwtVerifier256 = require(RSA256(publicKey, null)).build();
+    jwtVerifier384 = require(RSA384(publicKey, null)).build();
+    jwtVerifier512 = require(RSA512(publicKey, null)).build();
 
     return this;
   }
