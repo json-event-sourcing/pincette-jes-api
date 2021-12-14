@@ -6,7 +6,7 @@
 
   <groupId>net.pincette</groupId>
   <artifactId>pincette-jes-api</artifactId>
-  <version>2.0.2</version>
+  <version>2.0.3</version>
   <packaging>jar</packaging>
   <name>pincette-jes-api</name>
   <description>HTTP Handling For pincette-jes</description>
@@ -149,7 +149,7 @@
           </additionalJOptions>
           <links>
             <link>https://docs.oracle.com/en/java/javase/11/docs/api/</link>
-            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/2.0/</link>
+            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/2.0.1/</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-common/2.0</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-mongo/3.1/</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-json/2.0/</link>

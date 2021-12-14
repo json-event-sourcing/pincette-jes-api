@@ -18,6 +18,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
+import static java.util.Base64.getUrlDecoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.concurrent.CompletableFuture.runAsync;
@@ -521,7 +522,7 @@ public class Server implements Closeable {
         .map(com.auth0.jwt.JWT::decode)
         .map(this::verifyJwt)
         .map(DecodedJWT::getPayload)
-        .map(jwt -> new String(getDecoder().decode(jwt), UTF_8))
+        .map(jwt -> new String(getUrlDecoder().decode(jwt), UTF_8))
         .flatMap(JsonUtil::from)
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
