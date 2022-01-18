@@ -8,7 +8,6 @@ import static com.mongodb.client.model.Filters.and;
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.exists;
 import static com.mongodb.client.model.Filters.in;
-import static com.mongodb.client.model.Filters.not;
 import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
 import static java.lang.String.join;
@@ -19,6 +18,7 @@ import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
 import static java.util.Base64.getUrlDecoder;
+import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.concurrent.CompletableFuture.runAsync;
@@ -55,7 +55,6 @@ import static net.pincette.jes.util.JsonFields.TIMESTAMP;
 import static net.pincette.jes.util.JsonFields.TYPE;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
-import static net.pincette.jes.util.Mongo.NOT_DELETED;
 import static net.pincette.json.JsonUtil.addIf;
 import static net.pincette.json.JsonUtil.createObjectBuilder;
 import static net.pincette.json.JsonUtil.string;
@@ -65,7 +64,6 @@ import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
 import static net.pincette.rs.Source.of;
 import static net.pincette.util.Array.hasPrefix;
-import static net.pincette.util.Builder.create;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
 import static net.pincette.util.Or.tryWith;
@@ -144,8 +142,10 @@ import org.jasypt.salt.StringFixedSaltGenerator;
  */
 public class Server implements Closeable {
   private static final String ACCESS_TOKEN = "access_token";
+  private static final Bson ACL_NOT_EXISTS = exists(ACL, false);
   private static final String ERROR = "ERROR";
   private static final String MATCH = "$match";
+  private static final String NO_ACL = "noacl";
   private static final int RESULT_SET_BUFFER = 100;
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
@@ -171,8 +171,8 @@ public class Server implements Closeable {
   private BiPredicate<JsonObject, JsonObject> responseFilter = (json, jwt) -> true;
   private String serviceVersion;
 
-  private static Bson aclQuery(final JsonObject jwt) {
-    return or(not(exists(ACL)), in(ACL + "." + ACL_GET, getRoles(jwt)));
+  private static Bson aclQuery(final JsonObject jwt, final boolean noAcl) {
+    return noAcl ? ACL_NOT_EXISTS : or(ACL_NOT_EXISTS, in(ACL + "." + ACL_GET, getRoles(jwt)));
   }
 
   private static JsonObject completeCommand(final JsonObject command) {
@@ -253,11 +253,7 @@ public class Server implements Closeable {
   }
 
   private static String getBearerTokenFromQueryString(final Request request) {
-    return Optional.ofNullable(request.queryString)
-        .map(q -> q.get(ACCESS_TOKEN))
-        .filter(values -> values.length == 1)
-        .map(values -> values[0])
-        .orElse(null);
+    return singleValueQueryParameter(request, ACCESS_TOKEN);
   }
 
   private static Optional<String> getCorr(final Request request) {
@@ -344,6 +340,13 @@ public class Server implements Closeable {
     return obj;
   }
 
+  private static boolean noAcl(final Request request) {
+    return ofNullable(request)
+        .map(r -> singleValueQueryParameter(r, NO_ACL))
+        .map(Boolean::parseBoolean)
+        .orElse(false);
+  }
+
   private static JsonObject onBehalfOf(final JsonObject jwt, final Request request) {
     return Optional.of(jwt.getString(SUB))
         .filter(sub -> sub.equals("system"))
@@ -355,6 +358,14 @@ public class Server implements Closeable {
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .orElse(jwt);
+  }
+
+  private static String singleValueQueryParameter(final Request request, final String name) {
+    return Optional.ofNullable(request.queryString)
+        .map(q -> q.get(name))
+        .filter(values -> values.length == 1)
+        .map(values -> values[0])
+        .orElse(null);
   }
 
   public void close() {
@@ -369,33 +380,32 @@ public class Server implements Closeable {
     return command.getString(TYPE) + "-command" + (environment != null ? ("-" + environment) : "");
   }
 
-  private BsonDocument completeMatch(final Bson original, final JsonObject jwt) {
-    return new BsonDocument(MATCH, toBsonDocument(completeQuery(original, jwt)));
+  private BsonDocument completeMatch(
+      final Bson original, final JsonObject jwt, final boolean noAcl) {
+    return new BsonDocument(MATCH, toBsonDocument(completeQuery(original, jwt, noAcl)));
   }
 
-  private Bson completeQuery(final Bson original, final JsonObject jwt) {
-    return and(
-        create(() -> list(NOT_DELETED))
-            .updateIf(
-                l ->
-                    !jwt.getString(SUB).equals("system")
-                        && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false)),
-                l -> l.add(aclQuery(jwt)))
-            .updateIf(l -> original != null, l -> l.add(original))
-            .build());
+  private Bson completeQuery(final Bson original, final JsonObject jwt, final boolean noAcl) {
+    return !jwt.getString(SUB).equals("system")
+            && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false))
+        ? and(original, aclQuery(jwt, noAcl))
+        : original;
   }
 
-  private List<BsonDocument> completeQuery(final List<BsonDocument> stages, final JsonObject jwt) {
+  private List<BsonDocument> completeQuery(
+      final List<BsonDocument> stages, final JsonObject jwt, final boolean noAcl) {
     final List<BsonDocument> result =
         stages.stream()
             .map(
                 stage ->
-                    stage.containsKey(MATCH) ? completeMatch(stage.getDocument(MATCH), jwt) : stage)
+                    stage.containsKey(MATCH)
+                        ? completeMatch(stage.getDocument(MATCH), jwt, noAcl)
+                        : stage)
             .collect(toList());
 
     return hasMatch(result)
         ? result
-        : concat(Stream.of(completeMatch(null, jwt)), result.stream()).collect(toList());
+        : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).collect(toList());
   }
 
   private JsonObject createLogMessage(
@@ -540,7 +550,7 @@ public class Server implements Closeable {
             r ->
                 ok().withBody(
                         with(getCollection(path)
-                                .find(completeQuery((Bson) null, jwt), BsonDocument.class))
+                                .find(completeQuery((Bson) null, jwt, false), BsonDocument.class))
                             .buffer(RESULT_SET_BUFFER)
                             .map(BsonUtil::fromBson)
                             .filter(json -> responseFilter.test(json, jwt))
@@ -551,7 +561,11 @@ public class Server implements Closeable {
     final Function<JsonObject, Response> filter =
         json -> responseFilter.test(json, jwt) ? ok().withBody(of(list(json))) : forbidden();
 
-    return find(getCollection(path), completeQuery(eq(ID, path.id), jwt), BsonDocument.class, null)
+    return find(
+            getCollection(path),
+            completeQuery(eq(ID, path.id), jwt, false),
+            BsonDocument.class,
+            null)
         .thenComposeAsync(
             result ->
                 result.isEmpty()
@@ -752,7 +766,7 @@ public class Server implements Closeable {
         .filter(JsonUtil::isArray)
         .map(JsonValue::asJsonArray)
         .map(stages -> pair(fromJson(stages), string(stages)))
-        .map(pair -> pair(completeQuery(pair.first, jwt), pair.second))
+        .map(pair -> pair(completeQuery(pair.first, jwt, noAcl(request)), pair.second))
         .map(
             pair ->
                 sendAudit(jwt, path, pair.second)
