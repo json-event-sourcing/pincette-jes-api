@@ -4,7 +4,9 @@ import static com.auth0.jwt.JWT.require;
 import static com.auth0.jwt.algorithms.Algorithm.RSA256;
 import static com.auth0.jwt.algorithms.Algorithm.RSA384;
 import static com.auth0.jwt.algorithms.Algorithm.RSA512;
+import static com.mongodb.client.model.Aggregates.match;
 import static com.mongodb.client.model.Filters.and;
+import static com.mongodb.client.model.Filters.empty;
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.exists;
 import static com.mongodb.client.model.Filters.in;
@@ -143,6 +145,7 @@ import org.jasypt.salt.StringFixedSaltGenerator;
 public class Server implements Closeable {
   private static final String ACCESS_TOKEN = "access_token";
   private static final Bson ACL_NOT_EXISTS = exists(ACL, false);
+  private static final List<BsonDocument> EMPTY_MATCH = list(toBsonDocument(match(empty())));
   private static final String ERROR = "ERROR";
   private static final String MATCH = "$match";
   private static final String NO_ACL = "noacl";
@@ -470,6 +473,11 @@ public class Server implements Closeable {
     return tryWithLog(() -> getEncryptor().encrypt(username)).orElse(null);
   }
 
+  private Response exception(final Throwable e) {
+    return SideEffect.<Response>run(() -> logger.log(SEVERE, ERROR, e))
+        .andThenGet(() -> internalServerError().withException(e));
+  }
+
   private ElasticCommonSchema ecs() {
     return ecs != null
         ? ecs
@@ -502,7 +510,11 @@ public class Server implements Closeable {
         .or(
             () ->
                 Optional.ofNullable(mongoDatabase)
-                    .map(database -> path.id != null ? getOne(jwt, path) : getList(jwt, path))
+                    .map(
+                        database ->
+                            path.id != null
+                                ? getOne(jwt, path)
+                                : getList(jwt, path, noAcl(request)))
                     .orElse(null))
         .get()
         .orElseGet(() -> completedFuture(notImplemented()));
@@ -544,17 +556,9 @@ public class Server implements Closeable {
                     .andThenGet(() -> j));
   }
 
-  private CompletionStage<Response> getList(final JsonObject jwt, final Path path) {
-    return sendAudit(jwt, path, "list")
-        .thenApply(
-            r ->
-                ok().withBody(
-                        with(getCollection(path)
-                                .find(completeQuery((Bson) null, jwt, false), BsonDocument.class))
-                            .buffer(RESULT_SET_BUFFER)
-                            .map(BsonUtil::fromBson)
-                            .filter(json -> responseFilter.test(json, jwt))
-                            .get()));
+  private CompletionStage<Response> getList(
+      final JsonObject jwt, final Path path, final boolean noAcl) {
+    return getResults(EMPTY_MATCH, jwt, path, noAcl);
   }
 
   private CompletionStage<Response> getOne(final JsonObject jwt, final Path path) {
@@ -578,6 +582,24 @@ public class Server implements Closeable {
     return Optional.ofNullable(request.path)
         .map(path -> new Path(path, contextPath))
         .filter(path -> path.valid);
+  }
+
+  private CompletionStage<Response> getResults(
+      final List<BsonDocument> aggregation,
+      final JsonObject jwt,
+      final Path path,
+      final boolean noAcl) {
+    return sendAudit(jwt, path, "list")
+        .thenApply(
+            r ->
+                ok().withBody(
+                        with(getCollection(path)
+                                .aggregate(
+                                    completeQuery(aggregation, jwt, noAcl), BsonDocument.class))
+                            .buffer(RESULT_SET_BUFFER)
+                            .map(BsonUtil::fromBson)
+                            .filter(json -> responseFilter.test(json, jwt))
+                            .get()));
   }
 
   private CompletionStage<Response> getSse(final JsonObject jwt) {
@@ -640,17 +662,7 @@ public class Server implements Closeable {
 
   private Response log(
       final Request request, final Response response, final Instant started, final JsonObject jwt) {
-    final Runnable emit =
-        () ->
-            runAsync(
-                () ->
-                    producer.send(
-                        new ProducerRecord<>(
-                            logTopic,
-                            randomUUID().toString(),
-                            createLogMessage(request, response, started, jwt)),
-                        (m, e) -> {}));
-
+    final Runnable emit = () -> sendLog(request, response, started, jwt);
     final Supplier<Response> tryWithBody =
         () ->
             response.body != null
@@ -735,12 +747,7 @@ public class Server implements Closeable {
                         .map(
                             jwt ->
                                 handleRequest(request, jwt, path)
-                                    .exceptionally(
-                                        e ->
-                                            SideEffect.<Response>run(
-                                                    () -> logger.log(SEVERE, ERROR, e))
-                                                .andThenGet(
-                                                    () -> internalServerError().withException(e)))
+                                    .exceptionally(this::exception)
                                     .thenApply(response -> log(request, response, started, jwt)))
                         .orElseGet(() -> completedFuture(notAuthorized())))
         .orElseGet(() -> completedFuture(notFound()))
@@ -765,20 +772,7 @@ public class Server implements Closeable {
     return Optional.ofNullable(request.body)
         .filter(JsonUtil::isArray)
         .map(JsonValue::asJsonArray)
-        .map(stages -> pair(fromJson(stages), string(stages)))
-        .map(pair -> pair(completeQuery(pair.first, jwt, noAcl(request)), pair.second))
-        .map(
-            pair ->
-                sendAudit(jwt, path, pair.second)
-                    .thenApply(
-                        r ->
-                            ok().withBody(
-                                    with(getCollection(path)
-                                            .aggregate(pair.first, BsonDocument.class))
-                                        .buffer(RESULT_SET_BUFFER)
-                                        .map(BsonUtil::fromBson)
-                                        .filter(json -> responseFilter.test(json, jwt))
-                                        .get())))
+        .map(stages -> getResults(fromJson(stages), jwt, path, noAcl(request)))
         .orElseGet(() -> completedFuture(badRequest()));
   }
 
@@ -811,6 +805,18 @@ public class Server implements Closeable {
     return send(producer, new ProducerRecord<>(commandTopic(c), c.getString(ID), c))
         .thenApply(result -> must(result, r -> r))
         .thenApply(result -> accepted());
+  }
+
+  private CompletionStage<Void> sendLog(
+      final Request request, final Response response, final Instant started, final JsonObject jwt) {
+    return runAsync(
+        () ->
+            producer.send(
+                new ProducerRecord<>(
+                    logTopic,
+                    randomUUID().toString(),
+                    createLogMessage(request, response, started, jwt)),
+                (m, e) -> {}));
   }
 
   private <T> Optional<T> tryWithLog(final SupplierWithException<T> supplier) {
