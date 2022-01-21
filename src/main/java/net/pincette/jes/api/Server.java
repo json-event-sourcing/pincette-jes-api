@@ -78,6 +78,7 @@ import static net.pincette.util.Util.tryToGetSilent;
 
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.mongodb.client.model.Filters;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
@@ -389,10 +390,14 @@ public class Server implements Closeable {
   }
 
   private Bson completeQuery(final Bson original, final JsonObject jwt, final boolean noAcl) {
-    return !jwt.getString(SUB).equals("system")
-            && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false))
-        ? and(original, aclQuery(jwt, noAcl))
-        : original;
+    return ofNullable(original)
+        .map(
+            o ->
+                !jwt.getString(SUB).equals("system")
+                        && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false))
+                    ? and(o, aclQuery(jwt, noAcl))
+                    : o)
+        .orElseGet(Filters::empty);
   }
 
   private List<BsonDocument> completeQuery(
