@@ -6,13 +6,13 @@ import static net.pincette.util.Pair.pair;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Flow.Publisher;
 import javax.json.JsonObject;
-import org.reactivestreams.Publisher;
 
 /**
  * The immutable response of a request.
  *
- * @author Werner Donn\u00e9
+ * @author Werner Donné
  * @since 1.0
  */
 public class Response {

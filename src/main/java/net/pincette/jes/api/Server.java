@@ -1,12 +1,6 @@
 package net.pincette.jes.api;
 
-import static com.auth0.jwt.JWT.require;
-import static com.auth0.jwt.algorithms.Algorithm.RSA256;
-import static com.auth0.jwt.algorithms.Algorithm.RSA384;
-import static com.auth0.jwt.algorithms.Algorithm.RSA512;
-import static com.mongodb.client.model.Aggregates.match;
 import static com.mongodb.client.model.Filters.and;
-import static com.mongodb.client.model.Filters.empty;
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.exists;
 import static com.mongodb.client.model.Filters.in;
@@ -14,12 +8,11 @@ import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
 import static java.lang.String.join;
 import static java.lang.String.valueOf;
-import static java.net.URLDecoder.decode;
+import static java.net.URLEncoder.encode;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.security.KeyFactory.getInstance;
 import static java.time.Instant.now;
 import static java.util.Base64.getDecoder;
-import static java.util.Base64.getUrlDecoder;
 import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -28,9 +21,22 @@ import static java.util.logging.Level.FINEST;
 import static java.util.logging.Level.INFO;
 import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Logger.getGlobal;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
 import static java.util.stream.Stream.concat;
+import static net.pincette.jes.Commands.DELETE;
+import static net.pincette.jes.Commands.PATCH;
+import static net.pincette.jes.Commands.PUT;
+import static net.pincette.jes.JsonFields.ACL;
+import static net.pincette.jes.JsonFields.ACL_GET;
+import static net.pincette.jes.JsonFields.COMMAND;
+import static net.pincette.jes.JsonFields.CORR;
+import static net.pincette.jes.JsonFields.ID;
+import static net.pincette.jes.JsonFields.JWT;
+import static net.pincette.jes.JsonFields.OPS;
+import static net.pincette.jes.JsonFields.ROLES;
+import static net.pincette.jes.JsonFields.SUB;
+import static net.pincette.jes.JsonFields.TIMESTAMP;
+import static net.pincette.jes.JsonFields.TYPE;
 import static net.pincette.jes.api.Response.accepted;
 import static net.pincette.jes.api.Response.badRequest;
 import static net.pincette.jes.api.Response.forbidden;
@@ -40,30 +46,15 @@ import static net.pincette.jes.api.Response.notFound;
 import static net.pincette.jes.api.Response.notImplemented;
 import static net.pincette.jes.api.Response.ok;
 import static net.pincette.jes.api.Response.redirect;
-import static net.pincette.jes.util.Commands.DELETE;
-import static net.pincette.jes.util.Commands.PATCH;
-import static net.pincette.jes.util.Commands.PUT;
-import static net.pincette.jes.util.JsonFields.ACL;
-import static net.pincette.jes.util.JsonFields.ACL_GET;
-import static net.pincette.jes.util.JsonFields.COMMAND;
-import static net.pincette.jes.util.JsonFields.CORR;
-import static net.pincette.jes.util.JsonFields.ID;
-import static net.pincette.jes.util.JsonFields.JWT;
-import static net.pincette.jes.util.JsonFields.JWT_BREAKING_THE_GLASS;
-import static net.pincette.jes.util.JsonFields.OPS;
-import static net.pincette.jes.util.JsonFields.ROLES;
-import static net.pincette.jes.util.JsonFields.SUB;
-import static net.pincette.jes.util.JsonFields.TIMESTAMP;
-import static net.pincette.jes.util.JsonFields.TYPE;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
-import static net.pincette.json.JsonUtil.addIf;
 import static net.pincette.json.JsonUtil.createObjectBuilder;
 import static net.pincette.json.JsonUtil.string;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
+import static net.pincette.rs.Probe.probe;
 import static net.pincette.rs.Source.of;
 import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Collections.list;
@@ -73,10 +64,9 @@ import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.must;
 import static net.pincette.util.Util.tryToGet;
-import static net.pincette.util.Util.tryToGetRethrow;
 import static net.pincette.util.Util.tryToGetSilent;
+import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
-import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.mongodb.client.model.Filters;
 import com.mongodb.reactivestreams.client.MongoClient;
@@ -84,8 +74,8 @@ import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
 import java.io.Closeable;
 import java.net.URI;
-import java.security.interfaces.RSAPublicKey;
-import java.security.spec.X509EncodedKeySpec;
+import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -109,9 +99,10 @@ import net.pincette.jes.elastic.ElasticCommonSchema.Builder;
 import net.pincette.jes.elastic.ElasticCommonSchema.ErrorBuilder;
 import net.pincette.jes.elastic.ElasticCommonSchema.EventBuilder;
 import net.pincette.jes.elastic.ElasticCommonSchema.UrlBuilder;
-import net.pincette.jes.util.AuditFields;
-import net.pincette.jes.util.JsonSerializer;
 import net.pincette.json.JsonUtil;
+import net.pincette.jwt.Signer;
+import net.pincette.jwt.Verifier;
+import net.pincette.kafka.json.JsonSerializer;
 import net.pincette.mongo.BsonUtil;
 import net.pincette.util.Collections;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -121,10 +112,6 @@ import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.conversions.Bson;
-import org.jasypt.encryption.pbe.PBEStringEncryptor;
-import org.jasypt.encryption.pbe.StandardPBEStringEncryptor;
-import org.jasypt.iv.StringFixedIvGenerator;
-import org.jasypt.salt.StringFixedSaltGenerator;
 
 /**
  * This class handles all the HTTP logic for the JSON Event Sourcing library. This makes it easier
@@ -140,38 +127,34 @@ import org.jasypt.salt.StringFixedSaltGenerator;
  * be redirected to the fanout.io service with the encrypted username in a URL parameter. Then
  * fanout.io comes back to the <code>/sse-setup</code> endpoint, where the channel is created.
  *
- * @author Werner Donn\u00e9
+ * @author Werner Donné
  * @since 1.0
  */
 public class Server implements Closeable {
-  private static final String ACCESS_TOKEN = "access_token";
   private static final Bson ACL_NOT_EXISTS = exists(ACL, false);
-  private static final List<BsonDocument> EMPTY_MATCH = list(toBsonDocument(match(empty())));
   private static final String ERROR = "ERROR";
+  private static final String JWT_PAYLOAD_HEADER = "x-jwtpayload";
   private static final String MATCH = "$match";
   private static final String NO_ACL = "noacl";
-  private static final int RESULT_SET_BUFFER = 100;
+  private static final int RESULT_SET_BUFFER = 10;
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
   private static final String UNKNOWN = "UNKNOWN";
 
-  private String auditTopic;
-  private boolean breakingTheGlass;
   private String[] contextPath = new String[0];
   private ElasticCommonSchema ecs;
   private String environment;
-  private char[] fanoutSecret;
+  private Signer fanoutSigner;
+  private Verifier fanoutVerifier;
   private int fanoutTimeout = 20;
   private String fanoutUri;
-  private JWTVerifier jwtVerifier256;
-  private JWTVerifier jwtVerifier384;
-  private JWTVerifier jwtVerifier512;
   private String logTopic;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
   private MongoDatabase mongoDatabase;
   private String mongoDatabaseName;
   private KafkaProducer<String, JsonObject> producer;
+  private boolean producerOwner;
   private BiPredicate<JsonObject, JsonObject> responseFilter = (json, jwt) -> true;
   private String serviceVersion;
 
@@ -185,30 +168,13 @@ public class Server implements Closeable {
         .add(TIMESTAMP, now().toEpochMilli())
         .add(
             CORR,
-            Optional.ofNullable(command.getString(CORR, null))
-                .orElseGet(() -> randomUUID().toString()))
-        .build();
-  }
-
-  private static JsonObject createAuditRecord(
-      final JsonObject jwt, final Path path, final String command) {
-    return addIf(
-            createObjectBuilder()
-                .add(AuditFields.TYPE, path.fullType())
-                .add(AuditFields.COMMAND, command)
-                .add(AuditFields.TIMESTAMP, now().toEpochMilli())
-                .add(
-                    AuditFields.USER,
-                    Optional.ofNullable(jwt.getString(SUB, null)).orElse("anonymous"))
-                .add(AuditFields.BREAKING_THE_GLASS, jwt.getBoolean(JWT_BREAKING_THE_GLASS, false)),
-            () -> path.id != null,
-            b -> b.add(AuditFields.AGGREGATE, path.id))
+            ofNullable(command.getString(CORR, null)).orElseGet(() -> randomUUID().toString()))
         .build();
   }
 
   private static Optional<JsonObjectBuilder> createCommand(
       final String command, final JsonObject jwt, final Path path) {
-    return Optional.ofNullable(path.id)
+    return ofNullable(path.id)
         .map(
             id ->
                 createObjectBuilder()
@@ -234,34 +200,11 @@ public class Server implements Closeable {
         .filter(JsonUtil::isObject)
         .map(BsonUtil::fromJson)
         .map(BsonValue::asDocument)
-        .collect(toList());
-  }
-
-  private static Optional<String> getBearerToken(final Request request) {
-    return tryWith(() -> getBearerTokenFromAuthorization(request))
-        .or(() -> getBearerTokenFromQueryString(request))
-        .or(() -> request.cookies.get(ACCESS_TOKEN))
-        .get()
-        .flatMap(t -> tryToGet(() -> decode(t, UTF_8)));
-  }
-
-  private static String getBearerTokenFromAuthorization(final Request request) {
-    return Optional.ofNullable(request.headersLowerCaseKeys.get("authorization"))
-        .filter(values -> values.length == 1)
-        .map(values -> values[0])
-        .map(header -> header.split(" "))
-        .filter(s -> s.length == 2)
-        .filter(s -> s[0].equalsIgnoreCase("Bearer"))
-        .map(s -> s[1])
-        .orElse(null);
-  }
-
-  private static String getBearerTokenFromQueryString(final Request request) {
-    return singleValueQueryParameter(request, ACCESS_TOKEN);
+        .toList();
   }
 
   private static Optional<String> getCorr(final Request request) {
-    return Optional.ofNullable(request.body)
+    return ofNullable(request.body)
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .map(json -> json.getString(CORR, null))
@@ -297,25 +240,15 @@ public class Server implements Closeable {
 
   private static Set<String> getRoles(final JsonObject jwt) {
     return concat(
-            Optional.ofNullable(jwt.getJsonArray(ROLES))
-                .map(
+            ofNullable(jwt.getJsonArray(ROLES)).stream()
+                .flatMap(
                     a ->
                         a.stream()
                             .filter(JsonUtil::isString)
                             .map(JsonUtil::asString)
-                            .map(JsonString::getString))
-                .orElseGet(Stream::empty),
+                            .map(JsonString::getString)),
             Stream.of(jwt.getString(SUB)))
         .collect(toSet());
-  }
-
-  private static RSAPublicKey getRSAPublicKey(final String key) {
-    return tryToGetRethrow(
-            () ->
-                (RSAPublicKey)
-                    getInstance("RSA")
-                        .generatePublic(new X509EncodedKeySpec(getDecoder().decode(key))))
-        .orElse(null);
   }
 
   private static Optional<String> getScheme(final Request request) {
@@ -327,7 +260,7 @@ public class Server implements Closeable {
   }
 
   private static Optional<URI> getUri(final Request request) {
-    return Optional.ofNullable(request.uri).flatMap(uri -> tryToGetSilent(() -> new URI(uri)));
+    return ofNullable(request.uri).flatMap(uri -> tryToGetSilent(() -> new URI(uri)));
   }
 
   private static Optional<String> getUriPath(final Request request) {
@@ -351,21 +284,8 @@ public class Server implements Closeable {
         .orElse(false);
   }
 
-  private static JsonObject onBehalfOf(final JsonObject jwt, final Request request) {
-    return Optional.of(jwt.getString(SUB))
-        .filter(sub -> sub.equals("system"))
-        .map(sub -> request.headers.get("X-Pincette-JES-OnBehalfOf"))
-        .filter(value -> value.length == 1)
-        .map(value -> value[0])
-        .filter(value -> value.length() > 0)
-        .flatMap(JsonUtil::from)
-        .filter(JsonUtil::isObject)
-        .map(JsonValue::asJsonObject)
-        .orElse(jwt);
-  }
-
   private static String singleValueQueryParameter(final Request request, final String name) {
-    return Optional.ofNullable(request.queryString)
+    return ofNullable(request.queryString)
         .map(q -> q.get(name))
         .filter(values -> values.length == 1)
         .map(values -> values[0])
@@ -373,7 +293,9 @@ public class Server implements Closeable {
   }
 
   public void close() {
-    producer.close();
+    if (producerOwner) {
+      producer.close();
+    }
 
     if (mongoClient != null) {
       mongoClient.close();
@@ -391,12 +313,7 @@ public class Server implements Closeable {
 
   private Bson completeQuery(final Bson original, final JsonObject jwt, final boolean noAcl) {
     return ofNullable(original)
-        .map(
-            o ->
-                !jwt.getString(SUB).equals("system")
-                        && (!breakingTheGlass || !jwt.getBoolean(JWT_BREAKING_THE_GLASS, false))
-                    ? and(o, aclQuery(jwt, noAcl))
-                    : o)
+        .map(o -> !jwt.getString(SUB).equals("system") ? and(o, aclQuery(jwt, noAcl)) : o)
         .orElseGet(Filters::empty);
   }
 
@@ -409,18 +326,18 @@ public class Server implements Closeable {
                     stage.containsKey(MATCH)
                         ? completeMatch(stage.getDocument(MATCH), jwt, noAcl)
                         : stage)
-            .collect(toList());
+            .toList();
 
     return hasMatch(result)
         ? result
-        : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).collect(toList());
+        : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).toList();
   }
 
   private JsonObject createLogMessage(
       final Request request, final Response response, final Instant started, final JsonObject jwt) {
     final Instant ended = now();
     final String method = request.method != null ? request.method : UNKNOWN;
-    final String user = Optional.ofNullable(jwt.getString(SUB, null)).orElse("anonymous");
+    final String user = ofNullable(jwt.getString(SUB, null)).orElse("anonymous");
 
     return ecs()
         .builder()
@@ -440,8 +357,7 @@ public class Server implements Closeable {
             b ->
                 b.addError()
                     .addCode(valueOf(response.statusCode))
-                    .addIf(
-                        () -> Optional.ofNullable(response.exception), ErrorBuilder::addThrowable)
+                    .addIf(() -> ofNullable(response.exception), ErrorBuilder::addThrowable)
                     .build())
         .addHttp()
         .addMethod(method)
@@ -464,7 +380,8 @@ public class Server implements Closeable {
   }
 
   private Optional<String> decodeUsername(final String username) {
-    return tryWithLog(() -> getEncryptor().decrypt(username));
+    return tryWithLog(() -> fanoutVerifier.verify(username.replace(' ', '+')))
+        .flatMap(decoded -> decoded.map(DecodedJWT::getSubject));
   }
 
   private CompletionStage<Response> delete(final JsonObject jwt, final Path path) {
@@ -475,7 +392,18 @@ public class Server implements Closeable {
   }
 
   private String encodeUsername(final String username) {
-    return tryWithLog(() -> getEncryptor().encrypt(username)).orElse(null);
+    return tryWithLog(
+            () ->
+                encode(
+                    fanoutSigner.sign(
+                        com.auth0
+                            .jwt
+                            .JWT
+                            .create()
+                            .withClaim(SUB, username)
+                            .withExpiresAt(now().plusSeconds(5))),
+                    US_ASCII))
+        .orElse(null);
   }
 
   private Response exception(final Throwable e) {
@@ -510,17 +438,14 @@ public class Server implements Closeable {
 
   private CompletionStage<Response> get(
       final Request request, final JsonObject jwt, final Path path) {
-    return tryWith(() -> path.sse && hasFanout() ? getSse(jwt) : null)
-        .or(() -> path.sseSetup && hasFanout() ? getSseSetup(request) : null)
+    return tryWith(() -> ofNullable(path.sse && hasFanout() ? getSse(jwt) : null))
+        .or(() -> ofNullable(path.sseSetup && hasFanout() ? getSseSetup(request) : null))
         .or(
             () ->
-                Optional.ofNullable(mongoDatabase)
+                ofNullable(mongoDatabase)
                     .map(
                         database ->
-                            path.id != null
-                                ? getOne(jwt, path)
-                                : getList(jwt, path, noAcl(request)))
-                    .orElse(null))
+                            path.id != null ? getOne(jwt, path) : completedFuture(notFound())))
         .get()
         .orElseGet(() -> completedFuture(notImplemented()));
   }
@@ -530,40 +455,12 @@ public class Server implements Closeable {
         path.fullType() + (environment != null ? ("-" + environment) : ""));
   }
 
-  private PBEStringEncryptor getEncryptor() {
-    final StandardPBEStringEncryptor encryptor = new StandardPBEStringEncryptor();
-
-    // Salt and IV are fixed because of load balancing, where /sse and /sse-setup may reach
-    // different instances.
-
-    encryptor.setSaltGenerator(new StringFixedSaltGenerator("dfg76dfb87df6g87dcv6d76f7x6tcvu7tsd"));
-    encryptor.setIvGenerator(new StringFixedIvGenerator("dsfsdf8678s6df7dsf5sf5f56sf6sd5f76s5sdh"));
-    encryptor.setPasswordCharArray(fanoutSecret);
-    encryptor.setStringOutputType("hexadecimal");
-
-    return encryptor;
-  }
-
   private Optional<JsonObject> getJwt(final Request request) {
-    return getBearerToken(request)
-        .map(com.auth0.jwt.JWT::decode)
-        .map(this::verifyJwt)
-        .map(DecodedJWT::getPayload)
-        .map(jwt -> new String(getUrlDecoder().decode(jwt), UTF_8))
+    return ofNullable(request.headersLowerCaseKeys.get(JWT_PAYLOAD_HEADER))
+        .filter(values -> values.length == 1)
+        .map(values -> new String(getDecoder().decode(values[0]), UTF_8))
         .flatMap(JsonUtil::from)
-        .filter(JsonUtil::isObject)
-        .map(JsonValue::asJsonObject)
-        .filter(jwt -> jwt.containsKey(SUB))
-        .map(jwt -> onBehalfOf(jwt, request))
-        .map(
-            j ->
-                SideEffect.<JsonObject>run(() -> logger.log(FINEST, "{0}", string(j)))
-                    .andThenGet(() -> j));
-  }
-
-  private CompletionStage<Response> getList(
-      final JsonObject jwt, final Path path, final boolean noAcl) {
-    return getResults(EMPTY_MATCH, jwt, path, noAcl);
+        .flatMap(JsonUtil::objectValue);
   }
 
   private CompletionStage<Response> getOne(final JsonObject jwt, final Path path) {
@@ -575,36 +472,28 @@ public class Server implements Closeable {
             completeQuery(eq(ID, path.id), jwt, false),
             BsonDocument.class,
             null)
-        .thenComposeAsync(
-            result ->
-                result.isEmpty()
-                    ? completedFuture(notFound())
-                    : sendAudit(jwt, path, "get")
-                        .thenApply(r -> filter.apply(fromBson(result.get(0)))));
+        .thenApply(result -> result.isEmpty() ? notFound() : filter.apply(fromBson(result.get(0))));
   }
 
   private Optional<Path> getPath(final Request request) {
-    return Optional.ofNullable(request.path)
+    return ofNullable(request.path)
         .map(path -> new Path(path, contextPath))
         .filter(path -> path.valid);
   }
 
-  private CompletionStage<Response> getResults(
+  private Response getResults(
       final List<BsonDocument> aggregation,
       final JsonObject jwt,
       final Path path,
       final boolean noAcl) {
-    return sendAudit(jwt, path, "list")
-        .thenApply(
-            r ->
-                ok().withBody(
-                        with(getCollection(path)
-                                .aggregate(
-                                    completeQuery(aggregation, jwt, noAcl), BsonDocument.class))
-                            .buffer(RESULT_SET_BUFFER)
-                            .map(BsonUtil::fromBson)
-                            .filter(json -> responseFilter.test(json, jwt))
-                            .get()));
+    return ok().withBody(
+            with(toFlowPublisher(
+                    getCollection(path)
+                        .aggregate(completeQuery(aggregation, jwt, noAcl), BsonDocument.class)))
+                .buffer(RESULT_SET_BUFFER)
+                .map(BsonUtil::fromBson)
+                .filter(json -> responseFilter.test(json, jwt))
+                .get());
   }
 
   private CompletionStage<Response> getSse(final JsonObject jwt) {
@@ -617,7 +506,7 @@ public class Server implements Closeable {
   }
 
   private CompletionStage<Response> getSseSetup(final Request request) {
-    return Optional.ofNullable(request.queryString)
+    return ofNullable(request.queryString)
         .map(q -> q.get("u"))
         .filter(u -> u.length == 1)
         .flatMap(u -> decodeUsername(u[0]))
@@ -631,28 +520,22 @@ public class Server implements Closeable {
 
   private CompletionStage<Response> handleRequest(
       final Request request, final JsonObject jwt, final Path path) {
-    switch (request.method) {
-      case "DELETE":
-        return delete(jwt, path);
-      case "GET":
-        return get(request, jwt, path);
-      case "PATCH":
-        return patch(request, jwt, path);
-      case "POST":
-        return post(request, jwt, path);
-      case "PUT":
-        return put(request, jwt, path);
-      default:
-        return completedFuture(notImplemented());
-    }
+    return switch (request.method) {
+      case "DELETE" -> delete(jwt, path);
+      case "GET" -> get(request, jwt, path);
+      case "PATCH" -> patch(request, jwt, path);
+      case "POST" -> post(request, jwt, path);
+      case "PUT" -> put(request, jwt, path);
+      default -> completedFuture(notImplemented());
+    };
   }
 
   private boolean hasFanout() {
-    return fanoutSecret != null && fanoutUri != null;
+    return fanoutSigner != null && fanoutVerifier != null && fanoutUri != null;
   }
 
   private boolean isCorrectObject(final Request request, final String id) {
-    return Optional.ofNullable(request.body)
+    return ofNullable(request.body)
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .filter(json -> json.containsKey(ID) && json.containsKey(TYPE))
@@ -674,9 +557,7 @@ public class Server implements Closeable {
                 ? new Response(
                     response.statusCode,
                     response.headers,
-                    with(response.body)
-                        .after(() -> SideEffect.<JsonObject>run(emit).andThenGet(() -> null))
-                        .get(),
+                    with(response.body).map(probe(emit)).get(),
                     response.exception)
                 : SideEffect.<Response>run(emit).andThenGet(() -> response);
 
@@ -693,10 +574,10 @@ public class Server implements Closeable {
 
   private CompletionStage<Response> patch(
       final Request request, final JsonObject jwt, final Path path) {
-    return Optional.ofNullable(path.id)
+    return ofNullable(path.id)
         .map(
             id ->
-                Optional.ofNullable(request.body)
+                ofNullable(request.body)
                     .filter(JsonUtil::isArray)
                     .flatMap(
                         body ->
@@ -709,19 +590,19 @@ public class Server implements Closeable {
 
   private CompletionStage<Response> post(
       final Request request, final JsonObject jwt, final Path path) {
-    return Optional.ofNullable(path.id)
+    return ofNullable(path.id)
         .map(
             id ->
                 isCorrectObject(request, id)
                     ? sendCommand(
                         createObjectBuilder(request.body.asJsonObject()).add(JWT, jwt).build())
                     : completedFuture(badRequest()))
-        .orElseGet(() -> search(request, jwt, path));
+        .orElseGet(() -> completedFuture(search(request, jwt, path)));
   }
 
   private CompletionStage<Response> put(
       final Request request, final JsonObject jwt, final Path path) {
-    return Optional.ofNullable(path.id)
+    return ofNullable(path.id)
         .map(
             id ->
                 isCorrectObject(request, id)
@@ -772,36 +653,12 @@ public class Server implements Closeable {
         && getPath(request).map(path -> path.id == null).orElse(false);
   }
 
-  private CompletionStage<Response> search(
-      final Request request, final JsonObject jwt, final Path path) {
-    return Optional.ofNullable(request.body)
+  private Response search(final Request request, final JsonObject jwt, final Path path) {
+    return ofNullable(request.body)
         .filter(JsonUtil::isArray)
         .map(JsonValue::asJsonArray)
         .map(stages -> getResults(fromJson(stages), jwt, path, noAcl(request)))
-        .orElseGet(() -> completedFuture(badRequest()));
-  }
-
-  private JWTVerifier selectVerifier(final String algorithm) {
-    switch (algorithm) {
-      case "RS384":
-        return jwtVerifier384;
-      case "RS512":
-        return jwtVerifier512;
-      default:
-        return jwtVerifier256;
-    }
-  }
-
-  private CompletionStage<Boolean> sendAudit(
-      final JsonObject jwt, final Path path, final String command) {
-    final String key = path.id != null ? path.id : path.fullType();
-
-    return auditTopic != null
-        ? send(
-                producer,
-                new ProducerRecord<>(auditTopic, key, createAuditRecord(jwt, path, command)))
-            .thenApply(result -> must(result, r -> r))
-        : completedFuture(true);
+        .orElseGet(Response::badRequest);
   }
 
   private CompletionStage<Response> sendCommand(final JsonObject command) {
@@ -812,9 +669,9 @@ public class Server implements Closeable {
         .thenApply(result -> accepted());
   }
 
-  private CompletionStage<Void> sendLog(
+  private void sendLog(
       final Request request, final Response response, final Instant started, final JsonObject jwt) {
-    return runAsync(
+    runAsync(
         () ->
             producer.send(
                 new ProducerRecord<>(
@@ -828,38 +685,6 @@ public class Server implements Closeable {
     return tryToGet(
         supplier,
         e -> SideEffect.<T>run(() -> logger.log(SEVERE, ERROR, e)).andThenGet(() -> null));
-  }
-
-  private DecodedJWT verifyJwt(final DecodedJWT jwt) {
-    return selectVerifier(jwt.getAlgorithm()).verify(jwt);
-  }
-
-  /**
-   * Causes all read-side requests to yield an entry in the audit trail, which is a Kafka topic.
-   * Note that the write-side is already audited in pincette-jes.
-   *
-   * @param auditTopic the given Kafka topic. It may be <code>null</code>.
-   * @return The server object itself.
-   * @since 1.0
-   */
-  public Server withAudit(final String auditTopic) {
-    this.auditTopic = auditTopic;
-
-    return this;
-  }
-
-  /**
-   * Enables the breaking the glass feature. When the JSON Web Token of a request has the field
-   * <code>breakingTheGlass</code> field set, the ACL is overruled and the request is let through.
-   * Use this with auditing turned on.
-   *
-   * @return The server object itself.
-   * @since 1.0
-   */
-  public Server withBreakingTheGlass() {
-    breakingTheGlass = true;
-
-    return this;
   }
 
   /**
@@ -891,15 +716,57 @@ public class Server implements Closeable {
   }
 
   /**
-   * This is the secret used to encrypt the username in the Server-Sent Event set-up with the
-   * fanout.io service. It must not be <code>null</code>.
+   * This is the private key used to sign the JWT containing the username in the Server-Sent Event
+   * set-up with the fanout.io service. It must not be <code>null</code>.
    *
-   * @param fanoutSecret the given secret.
+   * @param privateKey the given private key in PEM format.
    * @return The server object itself.
-   * @since 1.0
+   * @since 2.0
    */
-  public Server withFanoutSecret(final String fanoutSecret) {
-    this.fanoutSecret = fanoutSecret.toCharArray();
+  public Server withFanoutPrivateKey(final String privateKey) {
+    this.fanoutSigner = new Signer(privateKey);
+
+    return this;
+  }
+
+  /**
+   * This is the private key used to sign the JWT containing the username in the Server-Sent Event
+   * set-up with the fanout.io service. It must not be <code>null</code>.
+   *
+   * @param privateKey the given private key.
+   * @return The server object itself.
+   * @since 2.0
+   */
+  public Server withFanoutPrivateKey(final PrivateKey privateKey) {
+    this.fanoutSigner = new Signer(privateKey);
+
+    return this;
+  }
+
+  /**
+   * This is the public key used to verify the JWT containing the username in the Server-Sent Event
+   * set-up with the fanout.io service. It must not be <code>null</code>.
+   *
+   * @param publicKey the given public key in PEM format.
+   * @return The server object itself.
+   * @since 2.0
+   */
+  public Server withFanoutPublicKey(final String publicKey) {
+    this.fanoutVerifier = new Verifier(publicKey);
+
+    return this;
+  }
+
+  /**
+   * This is the public key used to verify the JWT containing the username in the Server-Sent Event
+   * set-up with the fanout.io service. It must not be <code>null</code>.
+   *
+   * @param publicKey the given public key.
+   * @return The server object itself.
+   * @since 2.0
+   */
+  public Server withFanoutPublicKey(final PublicKey publicKey) {
+    this.fanoutVerifier = new Verifier(publicKey);
 
     return this;
   }
@@ -944,6 +811,7 @@ public class Server implements Closeable {
             Collections.put(config, "client.id", randomUUID().toString()),
             new StringSerializer(),
             new JsonSerializer());
+    producerOwner = true;
 
     return this;
   }
@@ -1005,18 +873,16 @@ public class Server implements Closeable {
   }
 
   /**
-   * The public key with which all JSON Web Tokens are validated. It assumes RSA.
+   * The Kafka producer that will be used. If the <code>withKafkaConfig</code> method is used
+   * instead, a private producer will be created.
    *
-   * @param key the given public key. It must not be <code>null</code>.
+   * @param producer the given producer.
    * @return The server object itself.
-   * @since 1.0
+   * @since 3.0
    */
-  public Server withJwtPublicKey(final String key) {
-    final RSAPublicKey publicKey = getRSAPublicKey(key);
-
-    jwtVerifier256 = require(RSA256(publicKey, null)).build();
-    jwtVerifier384 = require(RSA384(publicKey, null)).build();
-    jwtVerifier512 = require(RSA512(publicKey, null)).build();
+  public Server withProducer(final KafkaProducer<String, JsonObject> producer) {
+    this.producer = producer;
+    producerOwner = false;
 
     return this;
   }

@@ -1,10 +1,10 @@
 package net.pincette.jes.api;
 
+import static java.lang.Float.compare;
 import static java.net.URLDecoder.decode;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.stream;
 import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static net.pincette.jes.api.Util.headersToString;
 import static net.pincette.json.JsonUtil.string;
@@ -17,7 +17,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.IntSupplier;
 import javax.json.JsonStructure;
 import net.pincette.util.Array;
 import net.pincette.util.Pair;
@@ -25,7 +24,7 @@ import net.pincette.util.Pair;
 /**
  * Represents the part of an HTTP request that is relevant to the API.
  *
- * @author Werner Donn\u00e9
+ * @author Werner Donné
  * @since 1.0
  */
 public class Request {
@@ -117,9 +116,7 @@ public class Request {
   }
 
   private static int compareWeighted(final Pair<String, Float> w1, final Pair<String, Float> w2) {
-    final IntSupplier equalOr = () -> w1.second.equals(w2.second) ? 0 : 1;
-
-    return w1.second >= w2.second ? -1 : equalOr.getAsInt();
+    return compare(w1.second, w2.second);
   }
 
   private static Map<String, String> getCookies(final Map<String, String[]> headers) {
@@ -169,7 +166,7 @@ public class Request {
         .map(split -> pair(split[0], split.length == 1 ? 1 : getWeight(split[1])))
         .sorted(Request::compareWeighted)
         .map(pair -> pair.first)
-        .collect(toList());
+        .toList();
   }
 
   private static <V> Map<String, V> toLowerCase(final Map<String, V> map) {
