@@ -6,7 +6,7 @@
 
   <groupId>net.pincette</groupId>
   <artifactId>pincette-jes-api</artifactId>
-  <version>3.0</version>
+  <version>3.0.1</version>
   <packaging>jar</packaging>
   <name>pincette-jes-api</name>
   <description>HTTP Handling For pincette-jes</description>
@@ -83,7 +83,7 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-rs</artifactId>
-      <version>3.4</version>
+      <version>3.4.2</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -93,22 +93,22 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes</artifactId>
-      <version>3.2</version>
+      <version>3.2.1</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes-util</artifactId>
-      <version>3.1.10</version>
+      <version>3.1.11</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes-elastic</artifactId>
-      <version>3.0.12</version>
+      <version>3.0.13</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-mongo</artifactId>
-      <version>4.1.7</version>
+      <version>4.1.8</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -185,8 +185,8 @@
           </additionalJOptions>
           <links>
             <link>https://docs.oracle.com/en/java/javase/17/docs/api/</link>
-            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/3.1.9/</link>
-            <link>https://www.javadoc.io/doc/net.pincette/pincette-common/2.3.4</link>
+            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/3.1.10/</link>
+            <link>https://www.javadoc.io/doc/net.pincette/pincette-common/2.3.5</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-mongo/4.1.7/</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-json/2.1.1/</link>
             <link>https://www.javadoc.io/doc/javax.json/javax.json-api/1.1.4/</link>
