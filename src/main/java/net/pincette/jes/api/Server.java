@@ -401,7 +401,7 @@ public class Server implements Closeable {
                             .JWT
                             .create()
                             .withClaim(SUB, username)
-                            .withExpiresAt(now().plusSeconds(5))),
+                            .withExpiresAt(now().plusSeconds(60))),
                     US_ASCII))
         .orElse(null);
   }

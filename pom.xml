@@ -6,7 +6,7 @@
 
   <groupId>net.pincette</groupId>
   <artifactId>pincette-jes-api</artifactId>
-  <version>3.0.1</version>
+  <version>3.0.2</version>
   <packaging>jar</packaging>
   <name>pincette-jes-api</name>
   <description>HTTP Handling For pincette-jes</description>
@@ -53,7 +53,7 @@
     <dependency>
       <groupId>org.apache.kafka</groupId>
       <artifactId>kafka-clients</artifactId>
-      <version>3.6.0</version>
+      <version>3.6.1</version>
     </dependency>
     <dependency>
       <groupId>javax.json</groupId>
@@ -63,12 +63,12 @@
     <dependency>
       <groupId>org.mongodb</groupId>
       <artifactId>bson</artifactId>
-      <version>4.11.0</version>
+      <version>4.11.1</version>
     </dependency>
     <dependency>
       <groupId>org.mongodb</groupId>
       <artifactId>mongodb-driver-reactivestreams</artifactId>
-      <version>4.11.0</version>
+      <version>4.11.1</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -98,7 +98,7 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes-util</artifactId>
-      <version>3.1.11</version>
+      <version>3.1.12</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -113,7 +113,7 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jwt</artifactId>
-      <version>1.0</version>
+      <version>1.0.1</version>
     </dependency>
     <dependency>
       <groupId>com.auth0</groupId>
@@ -177,7 +177,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
-        <version>3.6.0</version>
+        <version>3.6.3</version>
         <configuration>
           <additionalJOptions>
             <additionalJOption>-J-Dhttp.agent=maven-javadoc-plugin-${project.name}
@@ -185,9 +185,9 @@
           </additionalJOptions>
           <links>
             <link>https://docs.oracle.com/en/java/javase/17/docs/api/</link>
-            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/3.1.10/</link>
+            <link>https://www.javadoc.io/doc/net.pincette/pincette-jes-util/3.1.12/</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-common/2.3.5</link>
-            <link>https://www.javadoc.io/doc/net.pincette/pincette-mongo/4.1.7/</link>
+            <link>https://www.javadoc.io/doc/net.pincette/pincette-mongo/4.1.8/</link>
             <link>https://www.javadoc.io/doc/net.pincette/pincette-json/2.1.1/</link>
             <link>https://www.javadoc.io/doc/javax.json/javax.json-api/1.1.4/</link>
           </links>
