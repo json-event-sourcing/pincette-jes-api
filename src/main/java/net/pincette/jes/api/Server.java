@@ -132,6 +132,8 @@ import org.bson.conversions.Bson;
  */
 public class Server implements Closeable {
   private static final Bson ACL_NOT_EXISTS = exists(ACL, false);
+  private static final String AUTHORIZATION = "authorization";
+  private static final String BEARER = "Bearer";
   private static final String ERROR = "ERROR";
   private static final String JWT_PAYLOAD_HEADER = "x-jwtpayload";
   private static final String MATCH = "$match";
@@ -450,17 +452,36 @@ public class Server implements Closeable {
         .orElseGet(() -> completedFuture(notImplemented()));
   }
 
+  private static Optional<String> getBearerToken(final Request request) {
+    return Optional.of(request.headersLowerCaseKeys)
+        .map(h -> h.get(AUTHORIZATION))
+        .filter(h -> h.length == 1)
+        .map(h -> h[0])
+        .map(header -> header.split(" "))
+        .filter(s -> s.length == 2)
+        .filter(s -> s[0].equalsIgnoreCase(BEARER))
+        .map(s -> s[1]);
+  }
+
   private MongoCollection<Document> getCollection(final Path path) {
     return mongoDatabase.getCollection(
         path.fullType() + (environment != null ? ("-" + environment) : ""));
   }
 
   private Optional<JsonObject> getJwt(final Request request) {
-    return ofNullable(request.headersLowerCaseKeys.get(JWT_PAYLOAD_HEADER))
-        .filter(values -> values.length == 1)
-        .map(values -> new String(getDecoder().decode(values[0]), UTF_8))
+    return getBearerToken(request).flatMap(Server::getJwtPayload);
+  }
+
+  private static Optional<JsonObject> getJwtPayload(final String token) {
+    return Optional.of(token)
+        .map(t -> t.split("\\."))
+        .filter(s -> s.length > 1)
+        .map(s -> s[1].replace('-', '+').replace('_', '/'))
+        .map(s -> getDecoder().decode(s))
+        .map(b -> new String(b, UTF_8))
         .flatMap(JsonUtil::from)
-        .flatMap(JsonUtil::objectValue);
+        .filter(JsonUtil::isObject)
+        .map(JsonValue::asJsonObject);
   }
 
   private CompletionStage<Response> getOne(final JsonObject jwt, final Path path) {
