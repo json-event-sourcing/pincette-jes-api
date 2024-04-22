@@ -10,9 +10,8 @@ import static java.lang.String.join;
 import static java.lang.String.valueOf;
 import static java.net.URLEncoder.encode;
 import static java.nio.charset.StandardCharsets.US_ASCII;
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.Instant.now;
-import static java.util.Base64.getDecoder;
+import static java.util.Arrays.copyOfRange;
 import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -48,20 +47,26 @@ import static net.pincette.jes.api.Response.ok;
 import static net.pincette.jes.api.Response.redirect;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
+import static net.pincette.json.JsonUtil.createArrayBuilder;
 import static net.pincette.json.JsonUtil.createObjectBuilder;
+import static net.pincette.json.JsonUtil.isArray;
 import static net.pincette.json.JsonUtil.string;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
+import static net.pincette.rs.Mapper.map;
 import static net.pincette.rs.Probe.probe;
 import static net.pincette.rs.Source.of;
 import static net.pincette.util.Array.hasPrefix;
+import static net.pincette.util.Cases.withValue;
+import static net.pincette.util.Collections.intersection;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
 import static net.pincette.util.Or.tryWith;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
+import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
 import static net.pincette.util.Util.tryToGet;
 import static net.pincette.util.Util.tryToGetSilent;
@@ -79,15 +84,18 @@ import java.security.PublicKey;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Flow.Processor;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 import javax.json.JsonArray;
+import javax.json.JsonArrayBuilder;
 import javax.json.JsonObject;
 import javax.json.JsonObjectBuilder;
 import javax.json.JsonString;
@@ -135,8 +143,8 @@ public class Server implements Closeable {
   private static final String AUTHORIZATION = "authorization";
   private static final String BEARER = "Bearer";
   private static final String ERROR = "ERROR";
-  private static final String JWT_PAYLOAD_HEADER = "x-jwtpayload";
   private static final String MATCH = "$match";
+  private static final String MY_PRIVILEGES = "_myPrivileges";
   private static final String NO_ACL = "noacl";
   private static final int RESULT_SET_BUFFER = 10;
   private static final String SSE = "sse";
@@ -164,6 +172,17 @@ public class Server implements Closeable {
     return noAcl ? ACL_NOT_EXISTS : or(ACL_NOT_EXISTS, in(ACL + "." + ACL_GET, getRoles(jwt)));
   }
 
+  private static Processor<JsonObject, JsonObject> addMyPrivileges(final JsonObject jwt) {
+    return map(json -> addMyPrivileges(json, jwt));
+  }
+
+  private static JsonObject addMyPrivileges(final JsonObject json, final JsonObject jwt) {
+    return ofNullable(json.getJsonObject(ACL))
+        .flatMap(acl -> ofNullable(jwt.getJsonArray(ROLES)).map(roles -> myPrivileges(acl, roles)))
+        .map(privileges -> createObjectBuilder(json).add(MY_PRIVILEGES, privileges).build())
+        .orElse(json);
+  }
+
   private static JsonObject completeCommand(final JsonObject command) {
     return createObjectBuilder(command)
         .add(ID, command.getString(ID).toLowerCase())
@@ -171,6 +190,7 @@ public class Server implements Closeable {
         .add(
             CORR,
             ofNullable(command.getString(CORR, null)).orElseGet(() -> randomUUID().toString()))
+        .remove(MY_PRIVILEGES)
         .build();
   }
 
@@ -277,6 +297,15 @@ public class Server implements Closeable {
     logger.log(FINEST, "{0}", obj);
 
     return obj;
+  }
+
+  private static JsonArray myPrivileges(final JsonObject acl, final JsonArray roles) {
+    return acl.entrySet().stream()
+        .filter(e -> isArray(e.getValue()))
+        .filter(e -> !intersection(e.getValue().asJsonArray(), roles).isEmpty())
+        .map(Entry::getKey)
+        .reduce(createArrayBuilder(), JsonArrayBuilder::add, (b1, b2) -> b1)
+        .build();
   }
 
   private static boolean noAcl(final Request request) {
@@ -469,24 +498,15 @@ public class Server implements Closeable {
   }
 
   private Optional<JsonObject> getJwt(final Request request) {
-    return getBearerToken(request).flatMap(Server::getJwtPayload);
-  }
-
-  private static Optional<JsonObject> getJwtPayload(final String token) {
-    return Optional.of(token)
-        .map(t -> t.split("\\."))
-        .filter(s -> s.length > 1)
-        .map(s -> s[1].replace('-', '+').replace('_', '/'))
-        .map(s -> getDecoder().decode(s))
-        .map(b -> new String(b, UTF_8))
-        .flatMap(JsonUtil::from)
-        .filter(JsonUtil::isObject)
-        .map(JsonValue::asJsonObject);
+    return getBearerToken(request).flatMap(net.pincette.jwt.Util::getJwtPayload);
   }
 
   private CompletionStage<Response> getOne(final JsonObject jwt, final Path path) {
     final Function<JsonObject, Response> filter =
-        json -> responseFilter.test(json, jwt) ? ok().withBody(of(list(json))) : forbidden();
+        json ->
+            responseFilter.test(json, jwt)
+                ? ok().withBody(with(of(list(json))).map(addMyPrivileges(jwt)).get())
+                : forbidden();
 
     return find(
             getCollection(path),
@@ -498,7 +518,7 @@ public class Server implements Closeable {
 
   private Optional<Path> getPath(final Request request) {
     return ofNullable(request.path)
-        .map(path -> new Path(path, contextPath))
+        .map(path -> Path.parse(path, contextPath))
         .filter(path -> path.valid);
   }
 
@@ -514,6 +534,7 @@ public class Server implements Closeable {
                 .buffer(RESULT_SET_BUFFER)
                 .map(BsonUtil::fromBson)
                 .filter(json -> responseFilter.test(json, jwt))
+                .map(addMyPrivileges(jwt))
                 .get());
   }
 
@@ -616,7 +637,10 @@ public class Server implements Closeable {
             id ->
                 isCorrectObject(request, id)
                     ? sendCommand(
-                        createObjectBuilder(request.body.asJsonObject()).add(JWT, jwt).build())
+                        createObjectBuilder(request.body.asJsonObject())
+                            .add(JWT, jwt)
+                            .remove(MY_PRIVILEGES)
+                            .build())
                     : completedFuture(badRequest()))
         .orElseGet(() -> completedFuture(search(request, jwt, path)));
   }
@@ -935,50 +959,73 @@ public class Server implements Closeable {
   }
 
   private static class Path {
-    final String app;
-    final String id;
-    final boolean sse;
-    final boolean sseSetup;
-    final String type;
-    final boolean valid;
+    private final String app;
+    private final String id;
+    private final boolean sse;
+    private final boolean sseSetup;
+    private final String type;
+    private final boolean valid;
 
-    private Path(final String path, final String[] contextPath) {
+    private Path() {
+      this(null, null, false, false, null, false);
+    }
+
+    private Path(
+        final String app,
+        final String id,
+        final boolean sse,
+        final boolean sseSetup,
+        final String type,
+        final boolean valid) {
+      this.app = app;
+      this.id = id;
+      this.sse = sse;
+      this.sseSetup = sseSetup;
+      this.type = type;
+      this.valid = valid;
+    }
+
+    private static Path parse(final String path, final String[] contextPath) {
       final String[] segments = getSegments(path, "/").toArray(String[]::new);
-      final boolean aggregatePath = isAggregate(segments, contextPath);
 
-      sse = isSse(segments, contextPath);
-      sseSetup = isSseSetup(segments, contextPath);
-      valid = aggregatePath || sse || sseSetup;
-      app = aggregatePath ? segments[contextPath.length] : null;
-      type = aggregatePath ? getType(segments[contextPath.length + 1]) : null;
-      id =
-          aggregatePath && segments.length == contextPath.length + 3
-              ? segments[contextPath.length + 2].toLowerCase()
-              : null;
-    }
-
-    private static String getType(final String type) {
-      return Optional.of(type.indexOf('-'))
-          .filter(i -> i != -1)
-          .map(i -> type.substring(i + 1))
-          .orElse(type);
-    }
-
-    private static boolean isAggregate(final String[] path, final String[] contextPath) {
-      return (path.length == contextPath.length + 2 || path.length == contextPath.length + 3)
-          && hasPrefix(path, contextPath);
-    }
-
-    private static boolean isSse(final String[] path, final String[] contextPath) {
-      return path.length == contextPath.length + 1 && path[contextPath.length].equals(SSE);
-    }
-
-    private static boolean isSseSetup(final String[] path, final String[] contextPath) {
-      return path.length == contextPath.length + 1 && path[contextPath.length].equals(SSE_SETUP);
+      return !hasPrefix(segments, contextPath)
+          ? new Path()
+          : withValue(copyOfRange(segments, contextPath.length, segments.length))
+              .or(p -> p.length == 1 && p[0].equals(SSE), p -> new Path().withSse())
+              .or(p -> p.length == 1 && p[0].equals(SSE_SETUP), p -> new Path().withSseSetup())
+              .or(p -> p.length == 1, p -> new Path().withType(p[0]))
+              .or(p -> p.length == 2 && !isUUID(p[1]), p -> new Path().withApp(p[0]).withType(p[1]))
+              .or(p -> p.length == 2 && isUUID(p[1]), p -> new Path().withType(p[0]).withId(p[1]))
+              .or(
+                  p -> p.length == 3 && isUUID(p[2]),
+                  p -> new Path().withApp(p[0]).withType(p[1]).withId(p[2]))
+              .get()
+              .map(Path.class::cast)
+              .orElseGet(Path::new);
     }
 
     private String fullType() {
-      return app + "-" + type;
+      return (app != null ? (app + "-") : "") + (type != null ? type : "");
+    }
+
+    private Path withApp(final String app) {
+      return new Path(app, id, sse, sseSetup, type, true);
+    }
+
+    private Path withId(final String id) {
+      return new Path(app, id, sse, sseSetup, type, true);
+    }
+
+    private Path withSse() {
+      return new Path(app, id, true, sseSetup, type, true);
+    }
+
+    private Path withSseSetup() {
+      return new Path(app, id, sse, true, type, true);
+    }
+
+    private Path withType(final String type) {
+      return new Path(app, id, sse, sseSetup, type, true);
     }
   }
 }
