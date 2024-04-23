@@ -1005,7 +1005,7 @@ public class Server implements Closeable {
     }
 
     private String fullType() {
-      return (app != null ? (app + "-") : "") + (type != null ? type : "");
+      return (app != null && !type.contains("-") ? (app + "-") : "") + (type != null ? type : "");
     }
 
     private Path withApp(final String app) {
