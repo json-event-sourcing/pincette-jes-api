@@ -7,7 +7,6 @@ import static com.mongodb.client.model.Filters.in;
 import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
 import static java.lang.String.join;
-import static java.lang.String.valueOf;
 import static java.net.URLEncoder.encode;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.time.Instant.now;
@@ -15,7 +14,6 @@ import static java.util.Arrays.copyOfRange;
 import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
-import static java.util.concurrent.CompletableFuture.runAsync;
 import static java.util.logging.Level.FINEST;
 import static java.util.logging.Level.INFO;
 import static java.util.logging.Level.SEVERE;
@@ -50,13 +48,11 @@ import static net.pincette.jes.util.Kafka.send;
 import static net.pincette.json.JsonUtil.createArrayBuilder;
 import static net.pincette.json.JsonUtil.createObjectBuilder;
 import static net.pincette.json.JsonUtil.isArray;
-import static net.pincette.json.JsonUtil.string;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
 import static net.pincette.mongo.Collection.find;
 import static net.pincette.rs.Chain.with;
 import static net.pincette.rs.Mapper.map;
-import static net.pincette.rs.Probe.probe;
 import static net.pincette.rs.Source.of;
 import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Cases.withValue;
@@ -69,7 +65,6 @@ import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
 import static net.pincette.util.Util.tryToGet;
-import static net.pincette.util.Util.tryToGetSilent;
 import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -78,10 +73,8 @@ import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
 import java.io.Closeable;
-import java.net.URI;
 import java.security.PrivateKey;
 import java.security.PublicKey;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -91,7 +84,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow.Processor;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 import javax.json.JsonArray;
@@ -102,11 +94,6 @@ import javax.json.JsonString;
 import javax.json.JsonValue;
 import net.pincette.function.SideEffect;
 import net.pincette.function.SupplierWithException;
-import net.pincette.jes.elastic.ElasticCommonSchema;
-import net.pincette.jes.elastic.ElasticCommonSchema.Builder;
-import net.pincette.jes.elastic.ElasticCommonSchema.ErrorBuilder;
-import net.pincette.jes.elastic.ElasticCommonSchema.EventBuilder;
-import net.pincette.jes.elastic.ElasticCommonSchema.UrlBuilder;
 import net.pincette.json.JsonUtil;
 import net.pincette.jwt.Signer;
 import net.pincette.jwt.Verifier;
@@ -149,16 +136,13 @@ public class Server implements Closeable {
   private static final int RESULT_SET_BUFFER = 10;
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
-  private static final String UNKNOWN = "UNKNOWN";
 
   private String[] contextPath = new String[0];
-  private ElasticCommonSchema ecs;
   private String environment;
   private Signer fanoutSigner;
   private Verifier fanoutVerifier;
   private int fanoutTimeout = 20;
   private String fanoutUri;
-  private String logTopic;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
   private MongoDatabase mongoDatabase;
@@ -166,7 +150,6 @@ public class Server implements Closeable {
   private KafkaProducer<String, JsonObject> producer;
   private boolean producerOwner;
   private BiPredicate<JsonObject, JsonObject> responseFilter = (json, jwt) -> true;
-  private String serviceVersion;
 
   private static Bson aclQuery(final JsonObject jwt, final boolean noAcl) {
     return noAcl ? ACL_NOT_EXISTS : or(ACL_NOT_EXISTS, in(ACL + "." + ACL_GET, getRoles(jwt)));
@@ -225,41 +208,6 @@ public class Server implements Closeable {
         .toList();
   }
 
-  private static Optional<String> getCorr(final Request request) {
-    return ofNullable(request.body)
-        .filter(JsonUtil::isObject)
-        .map(JsonValue::asJsonObject)
-        .map(json -> json.getString(CORR, null))
-        .map(String::toLowerCase);
-  }
-
-  private static Optional<String> getDomain(final Request request) {
-    return getUri(request)
-        .map(URI::getAuthority)
-        .map(authority -> pair(authority, authority.indexOf('@')))
-        .map(pair -> pair.second != -1 ? pair.first.substring(pair.second + 1) : pair.first);
-  }
-
-  private static Optional<String> getExtension(final Request request) {
-    return getUriPath(request).flatMap(Server::getExtension);
-  }
-
-  private static Optional<String> getExtension(final String s) {
-    return Optional.of(s.lastIndexOf('.')).filter(i -> i != -1).map(i -> s.substring(i + 1));
-  }
-
-  private static Optional<String> getFragment(final Request request) {
-    return getUri(request).map(URI::getFragment);
-  }
-
-  private static Optional<Integer> getPort(final Request request) {
-    return getUri(request).map(URI::getPort).filter(port -> port != -1);
-  }
-
-  private static Optional<String> getQuery(final Request request) {
-    return getUri(request).map(URI::getQuery);
-  }
-
   private static Set<String> getRoles(final JsonObject jwt) {
     return concat(
             ofNullable(jwt.getJsonArray(ROLES)).stream()
@@ -271,22 +219,6 @@ public class Server implements Closeable {
                             .map(JsonString::getString)),
             Stream.of(jwt.getString(SUB)))
         .collect(toSet());
-  }
-
-  private static Optional<String> getScheme(final Request request) {
-    return getUri(request).map(URI::getScheme);
-  }
-
-  private static Optional<String> getTopLevelDomain(final Request request) {
-    return getDomain(request).map(domain -> getExtension(domain).orElse(domain));
-  }
-
-  private static Optional<URI> getUri(final Request request) {
-    return ofNullable(request.uri).flatMap(uri -> tryToGetSilent(() -> new URI(uri)));
-  }
-
-  private static Optional<String> getUriPath(final Request request) {
-    return getUri(request).map(URI::getPath);
   }
 
   private static boolean hasMatch(final List<BsonDocument> stages) {
@@ -364,52 +296,6 @@ public class Server implements Closeable {
         : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).toList();
   }
 
-  private JsonObject createLogMessage(
-      final Request request, final Response response, final Instant started, final JsonObject jwt) {
-    final Instant ended = now();
-    final String method = request.method != null ? request.method : UNKNOWN;
-    final String user = ofNullable(jwt.getString(SUB, null)).orElse("anonymous");
-
-    return ecs()
-        .builder()
-        .addUser(user)
-        .addIf(() -> getCorr(request), Builder::addTrace)
-        .addEvent()
-        .addAction(method)
-        .addDataset(getPath(request).map(Path::fullType).orElse(UNKNOWN))
-        .addDuration(ended.toEpochMilli() - started.toEpochMilli())
-        .addCreated(started)
-        .addStart(started)
-        .addEnd(ended)
-        .addIf(b -> response.statusCode >= 400, EventBuilder::addFailure)
-        .build()
-        .addIf(
-            b -> response.statusCode >= 400 || response.exception != null,
-            b ->
-                b.addError()
-                    .addCode(valueOf(response.statusCode))
-                    .addIf(() -> ofNullable(response.exception), ErrorBuilder::addThrowable)
-                    .build())
-        .addHttp()
-        .addMethod(method)
-        .addStatusCode(response.statusCode)
-        .addIf(b -> request.body != null, b -> b.addRequestBodyContent(string(request.body)))
-        .build()
-        .addUrl()
-        .addUsername(user)
-        .addIf(b -> request.uri != null, b -> b.addFull(request.uri).addOriginal(request.uri))
-        .addIf(() -> getDomain(request), UrlBuilder::addDomain)
-        .addIf(() -> getExtension(request), UrlBuilder::addExtension)
-        .addIf(() -> getFragment(request), UrlBuilder::addFragment)
-        .addIf(() -> getPort(request), UrlBuilder::addPort)
-        .addIf(() -> getQuery(request), UrlBuilder::addQuery)
-        .addIf(() -> getScheme(request), UrlBuilder::addScheme)
-        .addIf(() -> getTopLevelDomain(request), UrlBuilder::addTopLevelDomain)
-        .addIf(() -> getUriPath(request), UrlBuilder::addPath)
-        .build()
-        .build();
-  }
-
   private Optional<String> decodeUsername(final String username) {
     return tryWithLog(() -> fanoutVerifier.verify(username.replace(' ', '+')))
         .flatMap(decoded -> decoded.map(DecodedJWT::getSubject));
@@ -440,21 +326,6 @@ public class Server implements Closeable {
   private Response exception(final Throwable e) {
     return SideEffect.<Response>run(() -> logger.log(SEVERE, ERROR, e))
         .andThenGet(() -> internalServerError().withException(e));
-  }
-
-  private ElasticCommonSchema ecs() {
-    return ecs != null
-        ? ecs
-        : SideEffect.<ElasticCommonSchema>run(
-                () ->
-                    ecs =
-                        new ElasticCommonSchema()
-                            .withApp(logger.getName())
-                            .withService(logger.getName())
-                            .withLogLevel(logger.getLevel())
-                            .withEnvironment(environment)
-                            .withServiceVersion(serviceVersion))
-            .andThenGet(() -> ecs);
   }
 
   private Map<String, String[]> fanoutHeaders(final String username) {
@@ -590,24 +461,6 @@ public class Server implements Closeable {
         .orElse(false);
   }
 
-  private Response log(
-      final Request request, final Response response, final Instant started, final JsonObject jwt) {
-    final Runnable emit = () -> sendLog(request, response, started, jwt);
-    final Supplier<Response> tryWithBody =
-        () ->
-            response.body != null
-                ? new Response(
-                    response.statusCode,
-                    response.headers,
-                    with(response.body).map(probe(emit)).get(),
-                    response.exception)
-                : SideEffect.<Response>run(emit).andThenGet(() -> response);
-
-    return logTopic != null && logger.getLevel().intValue() <= INFO.intValue()
-        ? tryWithBody.get()
-        : response;
-  }
-
   private void openDatabase() {
     if (mongoDatabase == null && mongoClient != null && mongoDatabaseName != null) {
       mongoDatabase = mongoClient.getDatabase(mongoDatabaseName);
@@ -666,8 +519,6 @@ public class Server implements Closeable {
    * @since 1.0
    */
   public CompletionStage<Response> request(final Request request) {
-    final Instant started = now();
-
     return getPath(log(logger, request))
         .map(
             path ->
@@ -676,10 +527,7 @@ public class Server implements Closeable {
                     : getJwt(request)
                         .filter(jwt -> jwt.containsKey(SUB))
                         .map(
-                            jwt ->
-                                handleRequest(request, jwt, path)
-                                    .exceptionally(this::exception)
-                                    .thenApply(response -> log(request, response, started, jwt)))
+                            jwt -> handleRequest(request, jwt, path).exceptionally(this::exception))
                         .orElseGet(() -> completedFuture(notAuthorized())))
         .orElseGet(() -> completedFuture(notFound()))
         .thenApply(response -> log(logger, response));
@@ -712,18 +560,6 @@ public class Server implements Closeable {
     return send(producer, new ProducerRecord<>(commandTopic(c), c.getString(ID), c))
         .thenApply(result -> must(result, r -> r))
         .thenApply(result -> accepted());
-  }
-
-  private void sendLog(
-      final Request request, final Response response, final Instant started, final JsonObject jwt) {
-    runAsync(
-        () ->
-            producer.send(
-                new ProducerRecord<>(
-                    logTopic,
-                    randomUUID().toString(),
-                    createLogMessage(request, response, started, jwt)),
-                (m, e) -> {}));
   }
 
   private <T> Optional<T> tryWithLog(final SupplierWithException<T> supplier) {
@@ -862,21 +698,6 @@ public class Server implements Closeable {
   }
 
   /**
-   * The Kafka log topic. When set requests will be logged in the Elastic Common Schema.
-   *
-   * @param logTopic the given log topic.
-   * @return The server object itself.
-   * @see <a href="https://www.elastic.co/guide/en/ecs/current/ecs-field-reference.html">ECS Field
-   *     Reference</a>
-   * @since 1.1
-   */
-  public Server withLogTopic(final String logTopic) {
-    this.logTopic = logTopic;
-
-    return this;
-  }
-
-  /**
    * The logger.
    *
    * @param logger the given logger. It must not be <code>null</code>.
@@ -941,19 +762,6 @@ public class Server implements Closeable {
    */
   public Server withResponseFilter(final BiPredicate<JsonObject, JsonObject> responseFilter) {
     this.responseFilter = responseFilter;
-
-    return this;
-  }
-
-  /**
-   * The service version. This will be used in ECS logging.
-   *
-   * @param serviceVersion the given service version.
-   * @return The server object itself.
-   * @since 1.1
-   */
-  public Server withServiceVersion(final String serviceVersion) {
-    this.serviceVersion = serviceVersion;
 
     return this;
   }
