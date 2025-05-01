@@ -21,7 +21,6 @@ import static java.util.logging.Logger.getGlobal;
 import static java.util.stream.Collectors.toSet;
 import static java.util.stream.Stream.concat;
 import static net.pincette.jes.Commands.DELETE;
-import static net.pincette.jes.Commands.PATCH;
 import static net.pincette.jes.Commands.PUT;
 import static net.pincette.jes.JsonFields.ACL;
 import static net.pincette.jes.JsonFields.ACL_GET;
@@ -29,7 +28,6 @@ import static net.pincette.jes.JsonFields.COMMAND;
 import static net.pincette.jes.JsonFields.CORR;
 import static net.pincette.jes.JsonFields.ID;
 import static net.pincette.jes.JsonFields.JWT;
-import static net.pincette.jes.JsonFields.OPS;
 import static net.pincette.jes.JsonFields.ROLES;
 import static net.pincette.jes.JsonFields.SUB;
 import static net.pincette.jes.JsonFields.TIMESTAMP;
@@ -59,6 +57,7 @@ import static net.pincette.util.Cases.withValue;
 import static net.pincette.util.Collections.intersection;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.map;
+import static net.pincette.util.Collections.set;
 import static net.pincette.util.Or.tryWith;
 import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
@@ -130,10 +129,29 @@ public class Server implements Closeable {
   private static final String AUTHORIZATION = "authorization";
   private static final String BEARER = "Bearer";
   private static final String ERROR = "ERROR";
+  private static final Set<String> FORBIDDEN_STAGES =
+      set(
+          "$changeStream",
+          "$changeStreamSplitLargeEvent",
+          "$colStats",
+          "$currentOp",
+          "$graphLookup",
+          "$indexStats",
+          "$listLocalSessions",
+          "$listSampledQueries",
+          "$listSearchIndexes",
+          "$merge",
+          "$out",
+          "$planCacheStats",
+          "$querySettings",
+          "$queryStats",
+          "$shardedDataDistribution");
+  private static final String LOOKUP = "$lookup";
   private static final String MATCH = "$match";
   private static final String MY_PRIVILEGES = "_myPrivileges";
   private static final String NO_ACL = "noacl";
   private static final int RESULT_SET_BUFFER = 10;
+  private static final String SEARCH = "$search";
   private static final String SSE = "sse";
   private static final String SSE_SETUP = "sse-setup";
 
@@ -150,6 +168,7 @@ public class Server implements Closeable {
   private KafkaProducer<String, JsonObject> producer;
   private boolean producerOwner;
   private BiPredicate<JsonObject, JsonObject> responseFilter = (json, jwt) -> true;
+  private boolean warnLookup;
 
   private static Bson aclQuery(final JsonObject jwt, final boolean noAcl) {
     return noAcl ? ACL_NOT_EXISTS : or(ACL_NOT_EXISTS, in(ACL + "." + ACL_GET, getRoles(jwt)));
@@ -255,6 +274,13 @@ public class Server implements Closeable {
         .orElse(null);
   }
 
+  private static Stream<String> stages(final JsonArray stages) {
+    return stages.stream()
+        .filter(JsonUtil::isObject)
+        .map(JsonValue::asJsonObject)
+        .flatMap(o -> o.keySet().stream());
+  }
+
   public void close() {
     if (producerOwner) {
       producer.close();
@@ -291,7 +317,7 @@ public class Server implements Closeable {
                         : stage)
             .toList();
 
-    return hasMatch(result)
+    return hasMatch(result) || (!result.isEmpty() && result.get(0).containsKey(SEARCH))
         ? result
         : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).toList();
   }
@@ -436,7 +462,6 @@ public class Server implements Closeable {
     return switch (request.method) {
       case "DELETE" -> delete(jwt, path);
       case "GET" -> get(request, jwt, path);
-      case "PATCH" -> patch(request, jwt, path);
       case "POST" -> post(request, jwt, path);
       case "PUT" -> put(request, jwt, path);
       default -> completedFuture(notImplemented());
@@ -445,6 +470,10 @@ public class Server implements Closeable {
 
   private boolean hasFanout() {
     return fanoutSigner != null && fanoutVerifier != null && fanoutUri != null;
+  }
+
+  private boolean inspectStages(final JsonArray stages) {
+    return stages(stages).noneMatch(this::isForbiddenStage);
   }
 
   private boolean isCorrectObject(final Request request, final String id) {
@@ -461,26 +490,22 @@ public class Server implements Closeable {
         .orElse(false);
   }
 
+  private boolean isForbiddenStage(final String stage) {
+    return FORBIDDEN_STAGES.contains(stage) || (LOOKUP.equals(stage) && !warnLookup);
+  }
+
+  private JsonArray logWarnLookup(final JsonArray stages) {
+    if (warnLookup && stages(stages).anyMatch(LOOKUP::equals)) {
+      logger.warning(() -> "The $lookup stage was used in the aggregation " + stages);
+    }
+
+    return stages;
+  }
+
   private void openDatabase() {
     if (mongoDatabase == null && mongoClient != null && mongoDatabaseName != null) {
       mongoDatabase = mongoClient.getDatabase(mongoDatabaseName);
     }
-  }
-
-  private CompletionStage<Response> patch(
-      final Request request, final JsonObject jwt, final Path path) {
-    return ofNullable(path.id)
-        .map(
-            id ->
-                ofNullable(request.body)
-                    .filter(JsonUtil::isArray)
-                    .flatMap(
-                        body ->
-                            createCommand(PATCH, jwt, path)
-                                .map(builder -> builder.add(OPS, body).build()))
-                    .map(this::sendCommand)
-                    .orElseGet(() -> completedFuture(badRequest())))
-        .orElseGet(() -> completedFuture(notFound()));
   }
 
   private CompletionStage<Response> post(
@@ -550,6 +575,8 @@ public class Server implements Closeable {
     return ofNullable(request.body)
         .filter(JsonUtil::isArray)
         .map(JsonValue::asJsonArray)
+        .filter(this::inspectStages)
+        .map(this::logWarnLookup)
         .map(stages -> getResults(fromJson(stages), jwt, path, noAcl(request)))
         .orElseGet(Response::badRequest);
   }
@@ -762,6 +789,12 @@ public class Server implements Closeable {
    */
   public Server withResponseFilter(final BiPredicate<JsonObject, JsonObject> responseFilter) {
     this.responseFilter = responseFilter;
+
+    return this;
+  }
+
+  public Server withWarnLookup(final boolean warnLookup) {
+    this.warnLookup = warnLookup;
 
     return this;
   }
