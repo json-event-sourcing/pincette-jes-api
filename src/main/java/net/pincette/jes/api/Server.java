@@ -6,16 +6,12 @@ import static com.mongodb.client.model.Filters.exists;
 import static com.mongodb.client.model.Filters.in;
 import static com.mongodb.client.model.Filters.or;
 import static com.mongodb.reactivestreams.client.MongoClients.create;
-import static java.lang.String.join;
-import static java.net.URLEncoder.encode;
-import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.time.Instant.now;
 import static java.util.Arrays.copyOfRange;
 import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.logging.Level.FINEST;
-import static java.util.logging.Level.INFO;
 import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Logger.getGlobal;
 import static java.util.stream.Collectors.toSet;
@@ -40,7 +36,6 @@ import static net.pincette.jes.api.Response.notAuthorized;
 import static net.pincette.jes.api.Response.notFound;
 import static net.pincette.jes.api.Response.notImplemented;
 import static net.pincette.jes.api.Response.ok;
-import static net.pincette.jes.api.Response.redirect;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
 import static net.pincette.json.JsonUtil.createArrayBuilder;
@@ -56,24 +51,17 @@ import static net.pincette.util.Array.hasPrefix;
 import static net.pincette.util.Cases.withValue;
 import static net.pincette.util.Collections.intersection;
 import static net.pincette.util.Collections.list;
-import static net.pincette.util.Collections.map;
 import static net.pincette.util.Collections.set;
-import static net.pincette.util.Or.tryWith;
-import static net.pincette.util.Pair.pair;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
-import static net.pincette.util.Util.tryToGet;
 import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
 import com.mongodb.client.model.Filters;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
 import java.io.Closeable;
-import java.security.PrivateKey;
-import java.security.PublicKey;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -92,10 +80,7 @@ import javax.json.JsonObjectBuilder;
 import javax.json.JsonString;
 import javax.json.JsonValue;
 import net.pincette.function.SideEffect;
-import net.pincette.function.SupplierWithException;
 import net.pincette.json.JsonUtil;
-import net.pincette.jwt.Signer;
-import net.pincette.jwt.Verifier;
 import net.pincette.kafka.json.JsonSerializer;
 import net.pincette.mongo.BsonUtil;
 import net.pincette.util.Collections;
@@ -152,15 +137,9 @@ public class Server implements Closeable {
   private static final String NO_ACL = "noacl";
   private static final int RESULT_SET_BUFFER = 10;
   private static final String SEARCH = "$search";
-  private static final String SSE = "sse";
-  private static final String SSE_SETUP = "sse-setup";
 
   private String[] contextPath = new String[0];
   private String environment;
-  private Signer fanoutSigner;
-  private Verifier fanoutVerifier;
-  private int fanoutTimeout = 20;
-  private String fanoutUri;
   private Logger logger = getGlobal();
   private MongoClient mongoClient;
   private MongoDatabase mongoDatabase;
@@ -206,13 +185,6 @@ public class Server implements Closeable {
                     .add(JWT, jwt)
                     .add(ID, id)
                     .add(TYPE, path.fullType()));
-  }
-
-  private static String createFanoutUri(final String fanoutUri, final String[] contextPath) {
-    return fanoutUri
-        + (contextPath.length > 0 ? ("/" + join("/", contextPath)) : "")
-        + "/"
-        + SSE_SETUP;
   }
 
   private static JsonObject createPutCommand(final Request request, final JsonObject jwt) {
@@ -317,14 +289,9 @@ public class Server implements Closeable {
                         : stage)
             .toList();
 
-    return hasMatch(result) || (!result.isEmpty() && result.get(0).containsKey(SEARCH))
+    return hasMatch(result) || (!result.isEmpty() && result.getFirst().containsKey(SEARCH))
         ? result
         : concat(Stream.of(completeMatch(null, jwt, noAcl)), result.stream()).toList();
-  }
-
-  private Optional<String> decodeUsername(final String username) {
-    return tryWithLog(() -> fanoutVerifier.verify(username.replace(' ', '+')))
-        .flatMap(decoded -> decoded.map(DecodedJWT::getSubject));
   }
 
   private CompletionStage<Response> delete(final JsonObject jwt, final Path path) {
@@ -334,47 +301,15 @@ public class Server implements Closeable {
         .orElseGet(() -> completedFuture(notFound()));
   }
 
-  private String encodeUsername(final String username) {
-    return tryWithLog(
-            () ->
-                encode(
-                    fanoutSigner.sign(
-                        com.auth0
-                            .jwt
-                            .JWT
-                            .create()
-                            .withClaim(SUB, username)
-                            .withExpiresAt(now().plusSeconds(60))),
-                    US_ASCII))
-        .orElse(null);
-  }
-
   private Response exception(final Throwable e) {
     return SideEffect.<Response>run(() -> logger.log(SEVERE, ERROR, e))
         .andThenGet(() -> internalServerError().withException(e));
   }
 
-  private Map<String, String[]> fanoutHeaders(final String username) {
-    return map(
-        pair("Content-Type", new String[] {"text/event-stream"}),
-        pair("Cache-Control", new String[] {"no-cache"}),
-        pair("Grip-Hold", new String[] {"stream"}),
-        pair("Grip-Channel", new String[] {username}),
-        pair(
-            "Grip-Keep-Alive", new String[] {":\\n\\n; format=cstring; timeout=" + fanoutTimeout}));
-  }
-
   private CompletionStage<Response> get(
       final Request request, final JsonObject jwt, final Path path) {
-    return tryWith(() -> ofNullable(path.sse && hasFanout() ? getSse(jwt) : null))
-        .or(() -> ofNullable(path.sseSetup && hasFanout() ? getSseSetup(request) : null))
-        .or(
-            () ->
-                ofNullable(mongoDatabase)
-                    .map(
-                        database ->
-                            path.id != null ? getOne(jwt, path) : completedFuture(notFound())))
-        .get()
+    return ofNullable(mongoDatabase)
+        .map(database -> path.id != null ? getOne(jwt, path) : completedFuture(notFound()))
         .orElseGet(() -> completedFuture(notImplemented()));
   }
 
@@ -410,7 +345,8 @@ public class Server implements Closeable {
             completeQuery(eq(ID, path.id), jwt, false),
             BsonDocument.class,
             null)
-        .thenApply(result -> result.isEmpty() ? notFound() : filter.apply(fromBson(result.get(0))));
+        .thenApply(
+            result -> result.isEmpty() ? notFound() : filter.apply(fromBson(result.getFirst())));
   }
 
   private Optional<Path> getPath(final Request request) {
@@ -435,28 +371,6 @@ public class Server implements Closeable {
                 .get());
   }
 
-  private CompletionStage<Response> getSse(final JsonObject jwt) {
-    final String username = jwt.getString(SUB);
-    final String uri = createFanoutUri(fanoutUri, contextPath) + "?u=" + encodeUsername(username);
-
-    logger.log(INFO, "Redirect to {0} for user {1}", new Object[] {uri, username});
-
-    return completedFuture(redirect(uri));
-  }
-
-  private CompletionStage<Response> getSseSetup(final Request request) {
-    return ofNullable(request.queryString)
-        .map(q -> q.get("u"))
-        .filter(u -> u.length == 1)
-        .flatMap(u -> decodeUsername(u[0]))
-        .map(
-            username ->
-                SideEffect.<CompletionStage<Response>>run(
-                        () -> logger.log(INFO, "Set up fanout channel for user {0}", username))
-                    .andThenGet(() -> completedFuture(ok().withHeaders(fanoutHeaders(username)))))
-        .orElseGet(() -> completedFuture(forbidden()));
-  }
-
   private CompletionStage<Response> handleRequest(
       final Request request, final JsonObject jwt, final Path path) {
     return switch (request.method) {
@@ -466,10 +380,6 @@ public class Server implements Closeable {
       case "PUT" -> put(request, jwt, path);
       default -> completedFuture(notImplemented());
     };
-  }
-
-  private boolean hasFanout() {
-    return fanoutSigner != null && fanoutVerifier != null && fanoutUri != null;
   }
 
   private boolean inspectStages(final JsonArray stages) {
@@ -547,13 +457,10 @@ public class Server implements Closeable {
     return getPath(log(logger, request))
         .map(
             path ->
-                path.sseSetup
-                    ? getSseSetup(request)
-                    : getJwt(request)
-                        .filter(jwt -> jwt.containsKey(SUB))
-                        .map(
-                            jwt -> handleRequest(request, jwt, path).exceptionally(this::exception))
-                        .orElseGet(() -> completedFuture(notAuthorized())))
+                getJwt(request)
+                    .filter(jwt -> jwt.containsKey(SUB))
+                    .map(jwt -> handleRequest(request, jwt, path).exceptionally(this::exception))
+                    .orElseGet(() -> completedFuture(notAuthorized())))
         .orElseGet(() -> completedFuture(notFound()))
         .thenApply(response -> log(logger, response));
   }
@@ -589,12 +496,6 @@ public class Server implements Closeable {
         .thenApply(result -> accepted());
   }
 
-  private <T> Optional<T> tryWithLog(final SupplierWithException<T> supplier) {
-    return tryToGet(
-        supplier,
-        e -> SideEffect.<T>run(() -> logger.log(SEVERE, ERROR, e)).andThenGet(() -> null));
-  }
-
   /**
    * Sets the URL context path.
    *
@@ -619,89 +520,6 @@ public class Server implements Closeable {
    */
   public Server withEnvironment(final String environment) {
     this.environment = environment;
-
-    return this;
-  }
-
-  /**
-   * This is the private key used to sign the JWT containing the username in the Server-Sent Event
-   * set-up with the fanout.io service. It must not be <code>null</code>.
-   *
-   * @param privateKey the given private key in PEM format.
-   * @return The server object itself.
-   * @since 2.0
-   */
-  public Server withFanoutPrivateKey(final String privateKey) {
-    this.fanoutSigner = new Signer(privateKey);
-
-    return this;
-  }
-
-  /**
-   * This is the private key used to sign the JWT containing the username in the Server-Sent Event
-   * set-up with the fanout.io service. It must not be <code>null</code>.
-   *
-   * @param privateKey the given private key.
-   * @return The server object itself.
-   * @since 2.0
-   */
-  public Server withFanoutPrivateKey(final PrivateKey privateKey) {
-    this.fanoutSigner = new Signer(privateKey);
-
-    return this;
-  }
-
-  /**
-   * This is the public key used to verify the JWT containing the username in the Server-Sent Event
-   * set-up with the fanout.io service. It must not be <code>null</code>.
-   *
-   * @param publicKey the given public key in PEM format.
-   * @return The server object itself.
-   * @since 2.0
-   */
-  public Server withFanoutPublicKey(final String publicKey) {
-    this.fanoutVerifier = new Verifier(publicKey);
-
-    return this;
-  }
-
-  /**
-   * This is the public key used to verify the JWT containing the username in the Server-Sent Event
-   * set-up with the fanout.io service. It must not be <code>null</code>.
-   *
-   * @param publicKey the given public key.
-   * @return The server object itself.
-   * @since 2.0
-   */
-  public Server withFanoutPublicKey(final PublicKey publicKey) {
-    this.fanoutVerifier = new Verifier(publicKey);
-
-    return this;
-  }
-
-  /**
-   * Sets the amount of seconds a fanout.io connection is allowed to be idle.
-   *
-   * @param fanoutTimeout the timeout in seconds.
-   * @return The server object itself.
-   * @since 1.0
-   */
-  public Server withFanoutTimeout(final int fanoutTimeout) {
-    this.fanoutTimeout = fanoutTimeout;
-
-    return this;
-  }
-
-  /**
-   * The URL of the fanout.io service, which is used by the Server-Sent Events endpoint.
-   *
-   * @param fanoutUri the given URI. It may be <code>null</code>, in which case there will be no
-   *     support for Server-Sent Events.
-   * @return The server object itself.
-   * @since 1.0
-   */
-  public Server withFanoutUri(final String fanoutUri) {
-    this.fanoutUri = fanoutUri;
 
     return this;
   }
@@ -799,31 +617,10 @@ public class Server implements Closeable {
     return this;
   }
 
-  private static class Path {
-    private final String app;
-    private final String id;
-    private final boolean sse;
-    private final boolean sseSetup;
-    private final String type;
-    private final boolean valid;
-
+  private record Path(
+      String app, String id, boolean sse, boolean sseSetup, String type, boolean valid) {
     private Path() {
       this(null, null, false, false, null, false);
-    }
-
-    private Path(
-        final String app,
-        final String id,
-        final boolean sse,
-        final boolean sseSetup,
-        final String type,
-        final boolean valid) {
-      this.app = app;
-      this.id = id;
-      this.sse = sse;
-      this.sseSetup = sseSetup;
-      this.type = type;
-      this.valid = valid;
     }
 
     private static Path parse(final String path, final String[] contextPath) {
@@ -832,8 +629,6 @@ public class Server implements Closeable {
       return !hasPrefix(segments, contextPath)
           ? new Path()
           : withValue(copyOfRange(segments, contextPath.length, segments.length))
-              .or(p -> p.length == 1 && p[0].equals(SSE), p -> new Path().withSse())
-              .or(p -> p.length == 1 && p[0].equals(SSE_SETUP), p -> new Path().withSseSetup())
               .or(p -> p.length == 1, p -> new Path().withType(p[0]))
               .or(p -> p.length == 2 && !isUUID(p[1]), p -> new Path().withApp(p[0]).withType(p[1]))
               .or(p -> p.length == 2 && isUUID(p[1]), p -> new Path().withType(p[0]).withId(p[1]))
@@ -855,14 +650,6 @@ public class Server implements Closeable {
 
     private Path withId(final String id) {
       return new Path(app, id, sse, sseSetup, type, true);
-    }
-
-    private Path withSse() {
-      return new Path(app, id, true, sseSetup, type, true);
-    }
-
-    private Path withSseSetup() {
-      return new Path(app, id, sse, true, type, true);
     }
 
     private Path withType(final String type) {
