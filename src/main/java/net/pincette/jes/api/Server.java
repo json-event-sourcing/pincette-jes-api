@@ -57,7 +57,9 @@ import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
 import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
+import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.Filters;
+import com.mongodb.reactivestreams.client.AggregatePublisher;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
@@ -131,12 +133,14 @@ public class Server implements Closeable {
           "$querySettings",
           "$queryStats",
           "$shardedDataDistribution");
+  private static final String LANGUAGE = "$language";
   private static final String LOOKUP = "$lookup";
   private static final String MATCH = "$match";
   private static final String MY_PRIVILEGES = "_myPrivileges";
   private static final String NO_ACL = "noacl";
   private static final int RESULT_SET_BUFFER = 10;
   private static final String SEARCH = "$search";
+  private static final String TEXT = "$text";
 
   private String[] contextPath = new String[0];
   private String environment;
@@ -238,6 +242,18 @@ public class Server implements Closeable {
         .orElse(false);
   }
 
+  private static Optional<String> preferredLanguage(final Request request) {
+    return request.languages.stream().findFirst();
+  }
+
+  private static <T> AggregatePublisher<T> setCollation(
+      final AggregatePublisher<T> publisher, final Request request) {
+    return preferredLanguage(request)
+        .map(Server::stripCountry)
+        .map(l -> publisher.collation(Collation.builder().locale(l).build()))
+        .orElse(publisher);
+  }
+
   private static String singleValueQueryParameter(final Request request, final String name) {
     return ofNullable(request.queryString)
         .map(q -> q.get(name))
@@ -251,6 +267,15 @@ public class Server implements Closeable {
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .flatMap(o -> o.keySet().stream());
+  }
+
+  // The buggers don't support all countries:
+  // https://www.mongodb.com/docs/manual/reference/collation-locales-defaults/#supported-languages-and-locales
+  private static String stripCountry(final String locale) {
+    return Optional.of(locale.indexOf('-'))
+        .filter(i -> i != -1)
+        .map(i -> locale.substring(0, i))
+        .orElse(locale);
   }
 
   public void close() {
@@ -306,8 +331,7 @@ public class Server implements Closeable {
         .andThenGet(() -> internalServerError().withException(e));
   }
 
-  private CompletionStage<Response> get(
-      final Request request, final JsonObject jwt, final Path path) {
+  private CompletionStage<Response> get(final JsonObject jwt, final Path path) {
     return ofNullable(mongoDatabase)
         .map(database -> path.id != null ? getOne(jwt, path) : completedFuture(notFound()))
         .orElseGet(() -> completedFuture(notImplemented()));
@@ -356,14 +380,18 @@ public class Server implements Closeable {
   }
 
   private Response getResults(
+      final Request request,
       final List<BsonDocument> aggregation,
       final JsonObject jwt,
-      final Path path,
-      final boolean noAcl) {
+      final Path path) {
     return ok().withBody(
             with(toFlowPublisher(
-                    getCollection(path)
-                        .aggregate(completeQuery(aggregation, jwt, noAcl), BsonDocument.class)))
+                    setCollation(
+                        getCollection(path)
+                            .aggregate(
+                                completeQuery(aggregation, jwt, noAcl(request)),
+                                BsonDocument.class),
+                        request)))
                 .buffer(RESULT_SET_BUFFER)
                 .map(BsonUtil::fromBson)
                 .filter(json -> responseFilter.test(json, jwt))
@@ -375,7 +403,7 @@ public class Server implements Closeable {
       final Request request, final JsonObject jwt, final Path path) {
     return switch (request.method) {
       case "DELETE" -> delete(jwt, path);
-      case "GET" -> get(request, jwt, path);
+      case "GET" -> get(jwt, path);
       case "POST" -> post(request, jwt, path);
       case "PUT" -> put(request, jwt, path);
       default -> completedFuture(notImplemented());
@@ -402,6 +430,14 @@ public class Server implements Closeable {
 
   private boolean isForbiddenStage(final String stage) {
     return FORBIDDEN_STAGES.contains(stage) || (LOOKUP.equals(stage) && !warnLookup);
+  }
+
+  private static boolean isTextStage(final JsonValue stage) {
+    return Optional.of(stage)
+        .filter(JsonUtil::isObject)
+        .map(JsonValue::asJsonObject)
+        .map(o -> o.keySet().stream().filter(k -> k.equals(TEXT)).count() == 1)
+        .orElse(false);
   }
 
   private JsonArray logWarnLookup(final JsonArray stages) {
@@ -484,7 +520,7 @@ public class Server implements Closeable {
         .map(JsonValue::asJsonArray)
         .filter(this::inspectStages)
         .map(this::logWarnLookup)
-        .map(stages -> getResults(fromJson(stages), jwt, path, noAcl(request)))
+        .map(stages -> getResults(request, fromJson(stages), jwt, path))
         .orElseGet(Response::badRequest);
   }
 

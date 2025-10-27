@@ -1,9 +1,9 @@
 package net.pincette.jes.api;
 
-import static java.lang.Float.compare;
 import static java.net.URLDecoder.decode;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.stream;
+import static java.util.Comparator.comparing;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toMap;
 import static net.pincette.jes.api.Util.headersToString;
@@ -115,10 +115,6 @@ public class Request {
     cookies = getCookies(headersLowerCaseKeys);
   }
 
-  private static int compareWeighted(final Pair<String, Float> w1, final Pair<String, Float> w2) {
-    return compare(w1.second, w2.second);
-  }
-
   private static Map<String, String> getCookies(final Map<String, String[]> headers) {
     return Optional.ofNullable(headers.get("cookie"))
         .map(
@@ -160,11 +156,11 @@ public class Request {
 
   private static List<String> sortByQualityValue(final String[] values) {
     return stream(values)
-        .flatMap(v -> stream(v.split(" ,")))
-        .map(v -> v.split(" ;"))
+        .flatMap(v -> stream(v.split(",")))
+        .map(v -> v.split(";"))
         .filter(split -> split.length == 1 || split.length == 2)
-        .map(split -> pair(split[0], split.length == 1 ? 1 : getWeight(split[1])))
-        .sorted(Request::compareWeighted)
+        .map(split -> pair(split[0], split.length == 1 ? 1.0F : getWeight(split[1])))
+        .sorted(comparing((Pair<String, Float> p) -> p.second).reversed())
         .map(pair -> pair.first)
         .toList();
   }
