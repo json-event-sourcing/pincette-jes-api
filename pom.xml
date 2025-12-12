@@ -6,7 +6,7 @@
 
   <groupId>net.pincette</groupId>
   <artifactId>pincette-jes-api</artifactId>
-  <version>4.1.1</version>
+  <version>4.1.2</version>
   <packaging>jar</packaging>
   <name>pincette-jes-api</name>
   <description>HTTP Handling For pincette-jes</description>
@@ -83,7 +83,7 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-rs</artifactId>
-      <version>3.11.3</version>
+      <version>3.11.4</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -93,17 +93,17 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes</artifactId>
-      <version>4.0.0</version>
+      <version>4.0.1</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes-util</artifactId>
-      <version>3.3.1</version>
+      <version>3.3.2</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-mongo</artifactId>
-      <version>4.3.4</version>
+      <version>4.3.5</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
