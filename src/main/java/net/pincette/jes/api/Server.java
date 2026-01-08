@@ -57,9 +57,7 @@ import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
 import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
-import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.Filters;
-import com.mongodb.reactivestreams.client.AggregatePublisher;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
@@ -246,14 +244,6 @@ public class Server implements Closeable {
     return request.languages.stream().findFirst();
   }
 
-  private static <T> AggregatePublisher<T> setCollation(
-      final AggregatePublisher<T> publisher, final Request request) {
-    return preferredLanguage(request)
-        .map(Server::stripCountry)
-        .map(l -> publisher.collation(Collation.builder().locale(l).build()))
-        .orElse(publisher);
-  }
-
   private static String singleValueQueryParameter(final Request request, final String name) {
     return ofNullable(request.queryString)
         .map(q -> q.get(name))
@@ -386,12 +376,9 @@ public class Server implements Closeable {
       final Path path) {
     return ok().withBody(
             with(toFlowPublisher(
-                    setCollation(
-                        getCollection(path)
-                            .aggregate(
-                                completeQuery(aggregation, jwt, noAcl(request)),
-                                BsonDocument.class),
-                        request)))
+                    getCollection(path)
+                        .aggregate(
+                            completeQuery(aggregation, jwt, noAcl(request)), BsonDocument.class)))
                 .buffer(RESULT_SET_BUFFER)
                 .map(BsonUtil::fromBson)
                 .filter(json -> responseFilter.test(json, jwt))
