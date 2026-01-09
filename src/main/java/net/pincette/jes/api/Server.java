@@ -11,6 +11,7 @@ import static java.util.Arrays.copyOfRange;
 import static java.util.Optional.ofNullable;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.logging.Level.FINEST;
 import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Logger.getGlobal;
@@ -32,14 +33,22 @@ import static net.pincette.jes.api.Response.accepted;
 import static net.pincette.jes.api.Response.badRequest;
 import static net.pincette.jes.api.Response.forbidden;
 import static net.pincette.jes.api.Response.internalServerError;
-import static net.pincette.jes.api.Response.notAuthorized;
 import static net.pincette.jes.api.Response.notFound;
 import static net.pincette.jes.api.Response.notImplemented;
 import static net.pincette.jes.api.Response.ok;
 import static net.pincette.jes.util.Kafka.createReliableProducer;
 import static net.pincette.jes.util.Kafka.send;
+import static net.pincette.json.Factory.f;
+import static net.pincette.json.Factory.o;
+import static net.pincette.json.Factory.v;
 import static net.pincette.json.JsonUtil.createArrayBuilder;
 import static net.pincette.json.JsonUtil.createObjectBuilder;
+import static net.pincette.json.JsonUtil.getArray;
+import static net.pincette.json.JsonUtil.getBoolean;
+import static net.pincette.json.JsonUtil.getInt;
+import static net.pincette.json.JsonUtil.getLong;
+import static net.pincette.json.JsonUtil.getObject;
+import static net.pincette.json.JsonUtil.getString;
 import static net.pincette.json.JsonUtil.isArray;
 import static net.pincette.mongo.BsonUtil.fromBson;
 import static net.pincette.mongo.BsonUtil.toBsonDocument;
@@ -52,12 +61,21 @@ import static net.pincette.util.Cases.withValue;
 import static net.pincette.util.Collections.intersection;
 import static net.pincette.util.Collections.list;
 import static net.pincette.util.Collections.set;
+import static net.pincette.util.ImmutableBuilder.create;
 import static net.pincette.util.Util.getSegments;
 import static net.pincette.util.Util.isUUID;
 import static net.pincette.util.Util.must;
+import static net.pincette.util.Util.tryToGet;
 import static org.reactivestreams.FlowAdapters.toFlowPublisher;
 
+import com.mongodb.client.model.Collation;
+import com.mongodb.client.model.Collation.Builder;
+import com.mongodb.client.model.CollationAlternate;
+import com.mongodb.client.model.CollationCaseFirst;
+import com.mongodb.client.model.CollationMaxVariable;
+import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.Filters;
+import com.mongodb.reactivestreams.client.AggregatePublisher;
 import com.mongodb.reactivestreams.client.MongoClient;
 import com.mongodb.reactivestreams.client.MongoCollection;
 import com.mongodb.reactivestreams.client.MongoDatabase;
@@ -71,6 +89,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow.Processor;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 import javax.json.JsonArray;
@@ -111,8 +130,19 @@ import org.bson.conversions.Bson;
  */
 public class Server implements Closeable {
   private static final Bson ACL_NOT_EXISTS = exists(ACL, false);
+  private static final String AGGREGATE = "/aggregate";
+  private static final String ALLOW_DISK_USE = "/allowDiskUse";
+  private static final String ALTERNATE = "/alternate";
+  private static final JsonObject ANONYMOUS = o(f(SUB, v("anonymous")));
   private static final String AUTHORIZATION = "authorization";
+  private static final String BACKWARDS = "/backwards";
+  private static final String BATCH_SIZE = "/batchSize";
   private static final String BEARER = "Bearer";
+  private static final String BYPASS_DOCUMENT_VALIDATION = "/bypassDocumentValidation";
+  private static final String CASE_FIRST = "/caseFirst";
+  private static final String CASE_LEVEL = "/caseLevel";
+  private static final String COLLATION = "/collation";
+  private static final String COMMENT = "/comment";
   private static final String ERROR = "ERROR";
   private static final Set<String> FORBIDDEN_STAGES =
       set(
@@ -131,14 +161,22 @@ public class Server implements Closeable {
           "$querySettings",
           "$queryStats",
           "$shardedDataDistribution");
-  private static final String LANGUAGE = "$language";
+  private static final String HINT = "/hint";
+  private static final String LET = "/let";
+  private static final String LOCALE = "/locale";
   private static final String LOOKUP = "$lookup";
   private static final String MATCH = "$match";
+  private static final String MAX_AWAIT_TIME_MS = "/maxAwaitTimeMS";
+  private static final String MAX_TIME_MS = "/maxTimeMS";
+  private static final String MAX_VARIABLE = "/maxVariable";
   private static final String MY_PRIVILEGES = "_myPrivileges";
+  private static final String NORMALIZATION = "/normalization";
   private static final String NO_ACL = "noacl";
+  private static final String NUMERIC_ORDERING = "/numericOrdering";
+  private static final String OPTIONS = "/options";
   private static final int RESULT_SET_BUFFER = 10;
   private static final String SEARCH = "$search";
-  private static final String TEXT = "$text";
+  private static final String STRENGTH = "/strength";
 
   private String[] contextPath = new String[0];
   private String environment;
@@ -164,6 +202,29 @@ public class Server implements Closeable {
         .flatMap(acl -> ofNullable(jwt.getJsonArray(ROLES)).map(roles -> myPrivileges(acl, roles)))
         .map(privileges -> createObjectBuilder(json).add(MY_PRIVILEGES, privileges).build())
         .orElse(json);
+  }
+
+  private static Collation collationOptions(final JsonObject options) {
+    return create(Collation::builder)
+        .updateIf(
+            () -> getString(options, ALTERNATE),
+            (b, v) -> b.collationAlternate(CollationAlternate.fromString(v)))
+        .updateIf(() -> getBoolean(options, BACKWARDS), Builder::backwards)
+        .updateIf(
+            () -> getString(options, CASE_FIRST),
+            (b, v) -> b.collationCaseFirst(CollationCaseFirst.fromString(v)))
+        .updateIf(() -> getBoolean(options, CASE_LEVEL), Builder::caseLevel)
+        .updateIf(() -> getString(options, LOCALE), Builder::locale)
+        .updateIf(
+            () -> getString(options, MAX_VARIABLE),
+            (b, v) -> b.collationMaxVariable(CollationMaxVariable.fromString(v)))
+        .updateIf(() -> getBoolean(options, NORMALIZATION), Builder::normalization)
+        .updateIf(() -> getBoolean(options, NUMERIC_ORDERING), Builder::numericOrdering)
+        .updateIf(
+            () -> getInt(options, STRENGTH),
+            (b, v) -> b.collationStrength(CollationStrength.fromInt(v)))
+        .build()
+        .build();
   }
 
   private static JsonObject completeCommand(final JsonObject command) {
@@ -201,6 +262,13 @@ public class Server implements Closeable {
         .toList();
   }
 
+  private static JsonObject getJwt(final Request request) {
+    return getBearerToken(request)
+        .flatMap(net.pincette.jwt.Util::getJwtPayload)
+        .filter(jwt -> jwt.containsKey(SUB))
+        .orElse(ANONYMOUS);
+  }
+
   private static Set<String> getRoles(final JsonObject jwt) {
     return concat(
             ofNullable(jwt.getJsonArray(ROLES)).stream()
@@ -212,6 +280,16 @@ public class Server implements Closeable {
                             .map(JsonString::getString)),
             Stream.of(jwt.getString(SUB)))
         .collect(toSet());
+  }
+
+  private static Optional<JsonObject> getSearchOptions(final Request request) {
+    return ofNullable(request.body).flatMap(body -> getObject(body, OPTIONS));
+  }
+
+  private static Optional<JsonArray> getSearchStages(final Request request) {
+    return ofNullable(request.body)
+        .flatMap(
+            body -> isArray(body) ? Optional.of(body.asJsonArray()) : getArray(body, AGGREGATE));
   }
 
   private static boolean hasMatch(final List<BsonDocument> stages) {
@@ -240,8 +318,22 @@ public class Server implements Closeable {
         .orElse(false);
   }
 
-  private static Optional<String> preferredLanguage(final Request request) {
-    return request.languages.stream().findFirst();
+  private static AggregatePublisher<BsonDocument> setSearchOptions(
+      final AggregatePublisher<BsonDocument> publisher, final JsonObject options) {
+    return create(() -> publisher)
+        .updateIf(() -> getBoolean(options, ALLOW_DISK_USE), AggregatePublisher::allowDiskUse)
+        .updateIf(() -> getInt(options, BATCH_SIZE), AggregatePublisher::batchSize)
+        .updateIf(
+            () -> getBoolean(options, BYPASS_DOCUMENT_VALIDATION),
+            AggregatePublisher::bypassDocumentValidation)
+        .updateIf(() -> getObject(options, COLLATION), (b, v) -> b.collation(collationOptions(v)))
+        .updateIf(() -> getString(options, COMMENT), AggregatePublisher::comment)
+        .updateIf(() -> getString(options, HINT), AggregatePublisher::hintString)
+        .updateIf(() -> getObject(options, LET), (b, v) -> b.let(BsonUtil.fromJson(v)))
+        .updateIf(
+            () -> getLong(options, MAX_AWAIT_TIME_MS), (b, v) -> b.maxAwaitTime(v, MILLISECONDS))
+        .updateIf(() -> getLong(options, MAX_TIME_MS), (b, v) -> b.maxTime(v, MILLISECONDS))
+        .build();
   }
 
   private static String singleValueQueryParameter(final Request request, final String name) {
@@ -257,15 +349,6 @@ public class Server implements Closeable {
         .filter(JsonUtil::isObject)
         .map(JsonValue::asJsonObject)
         .flatMap(o -> o.keySet().stream());
-  }
-
-  // The buggers don't support all countries:
-  // https://www.mongodb.com/docs/manual/reference/collation-locales-defaults/#supported-languages-and-locales
-  private static String stripCountry(final String locale) {
-    return Optional.of(locale.indexOf('-'))
-        .filter(i -> i != -1)
-        .map(i -> locale.substring(0, i))
-        .orElse(locale);
   }
 
   public void close() {
@@ -343,10 +426,6 @@ public class Server implements Closeable {
         path.fullType() + (environment != null ? ("-" + environment) : ""));
   }
 
-  private Optional<JsonObject> getJwt(final Request request) {
-    return getBearerToken(request).flatMap(net.pincette.jwt.Util::getJwtPayload);
-  }
-
   private CompletionStage<Response> getOne(final JsonObject jwt, final Path path) {
     final Function<JsonObject, Response> filter =
         json ->
@@ -372,13 +451,16 @@ public class Server implements Closeable {
   private Response getResults(
       final Request request,
       final List<BsonDocument> aggregation,
+      final UnaryOperator<AggregatePublisher<BsonDocument>> options,
       final JsonObject jwt,
       final Path path) {
     return ok().withBody(
             with(toFlowPublisher(
-                    getCollection(path)
-                        .aggregate(
-                            completeQuery(aggregation, jwt, noAcl(request)), BsonDocument.class)))
+                    options.apply(
+                        getCollection(path)
+                            .aggregate(
+                                completeQuery(aggregation, jwt, noAcl(request)),
+                                BsonDocument.class))))
                 .buffer(RESULT_SET_BUFFER)
                 .map(BsonUtil::fromBson)
                 .filter(json -> responseFilter.test(json, jwt))
@@ -417,14 +499,6 @@ public class Server implements Closeable {
 
   private boolean isForbiddenStage(final String stage) {
     return FORBIDDEN_STAGES.contains(stage) || (LOOKUP.equals(stage) && !warnLookup);
-  }
-
-  private static boolean isTextStage(final JsonValue stage) {
-    return Optional.of(stage)
-        .filter(JsonUtil::isObject)
-        .map(JsonValue::asJsonObject)
-        .map(o -> o.keySet().stream().filter(k -> k.equals(TEXT)).count() == 1)
-        .orElse(false);
   }
 
   private JsonArray logWarnLookup(final JsonArray stages) {
@@ -478,12 +552,7 @@ public class Server implements Closeable {
    */
   public CompletionStage<Response> request(final Request request) {
     return getPath(log(logger, request))
-        .map(
-            path ->
-                getJwt(request)
-                    .filter(jwt -> jwt.containsKey(SUB))
-                    .map(jwt -> handleRequest(request, jwt, path).exceptionally(this::exception))
-                    .orElseGet(() -> completedFuture(notAuthorized())))
+        .map(path -> handleRequest(request, getJwt(request), path).exceptionally(this::exception))
         .orElseGet(() -> completedFuture(notFound()))
         .thenApply(response -> log(logger, response));
   }
@@ -502,12 +571,23 @@ public class Server implements Closeable {
   }
 
   private Response search(final Request request, final JsonObject jwt, final Path path) {
-    return ofNullable(request.body)
-        .filter(JsonUtil::isArray)
-        .map(JsonValue::asJsonArray)
+    return getSearchStages(request)
         .filter(this::inspectStages)
         .map(this::logWarnLookup)
-        .map(stages -> getResults(request, fromJson(stages), jwt, path))
+        .flatMap(
+            stages ->
+                tryToGet(
+                    () ->
+                        getResults(
+                            request,
+                            fromJson(stages),
+                            publisher ->
+                                getSearchOptions(request)
+                                    .map(options -> setSearchOptions(publisher, options))
+                                    .orElse(publisher),
+                            jwt,
+                            path),
+                    e -> badRequest().withException(e)))
         .orElseGet(Response::badRequest);
   }
 
