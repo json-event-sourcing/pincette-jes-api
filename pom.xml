@@ -6,7 +6,7 @@
 
   <groupId>net.pincette</groupId>
   <artifactId>pincette-jes-api</artifactId>
-  <version>4.2.0</version>
+  <version>4.2.1</version>
   <packaging>jar</packaging>
   <name>pincette-jes-api</name>
   <description>HTTP Handling For pincette-jes</description>
@@ -56,6 +56,11 @@
       <version>4.1.1</version>
     </dependency>
     <dependency>
+      <groupId>org.lz4</groupId>
+      <artifactId>lz4-java</artifactId>
+      <version>1.8.1</version>
+    </dependency>
+    <dependency>
       <groupId>javax.json</groupId>
       <artifactId>javax.json-api</artifactId>
       <version>1.1.4</version>
@@ -73,7 +78,7 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-common</artifactId>
-      <version>2.5.7</version>
+      <version>2.5.8</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
@@ -93,12 +98,12 @@
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes</artifactId>
-      <version>4.0.1</version>
+      <version>4.0.2</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
       <artifactId>pincette-jes-util</artifactId>
-      <version>3.3.2</version>
+      <version>3.3.3</version>
     </dependency>
     <dependency>
       <groupId>net.pincette</groupId>
